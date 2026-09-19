@@ -2,6 +2,7 @@ package com.phoclaw.chat.data
 
 import android.content.Context
 import android.net.Uri
+import android.provider.DocumentsContract
 import androidx.documentfile.provider.DocumentFile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -245,7 +246,7 @@ class WorkspaceRepository(private val context: Context) {
 
         val existing = findChild(parent, fileName)
         val target = when {
-            existing == null -> parent.createFile(guessMime(fileName), fileName)
+            existing == null -> createFileExact(parent, fileName)
                 ?: throw FileNotFoundException("无法创建文件：$cleaned")
             existing.isDirectory -> throw IllegalArgumentException("同名目录已存在：$cleaned")
             else -> existing
@@ -255,7 +256,14 @@ class WorkspaceRepository(private val context: Context) {
             requireNotNull(output) { "无法以写入模式打开：$cleaned" }
             output.bufferedWriter().use { it.write(content) }
         }
-        "已写入 ${cleaned}（${content.toByteArray().size} 字节）"
+
+        // 回读真实落盘名：某些 provider 会自作主张改名，如实告知用户，避免「我明明叫 A」的困惑
+        val actualName = DocumentFile.fromSingleUri(context, target.uri)?.name ?: fileName
+        val writtenPath = if (parentPath.isEmpty()) actualName else "$parentPath/$actualName"
+        val note = if (actualName != fileName) {
+            "（注意：系统把文件名改成了 $actualName）"
+        } else ""
+        "已写入 $writtenPath（${content.toByteArray().size} 字节）$note"
     }
 
     /** 追加内容到文件末尾，文件不存在则创建。 */
@@ -272,7 +280,7 @@ class WorkspaceRepository(private val context: Context) {
 
         val existing = findChild(parent, fileName)
         val target = when {
-            existing == null -> parent.createFile(guessMime(fileName), fileName)
+            existing == null -> createFileExact(parent, fileName)
                 ?: throw FileNotFoundException("无法创建文件：$cleaned")
             existing.isDirectory -> throw IllegalArgumentException("同名目录已存在：$cleaned")
             else -> existing
@@ -340,7 +348,7 @@ class WorkspaceRepository(private val context: Context) {
             } else {
                 val existing = findChild(toParent, name)
                 val outFile = when {
-                    existing == null -> toParent.createFile(guessMime(name), name)
+                    existing == null -> createFileExact(toParent, name)
                     existing.isDirectory -> throw IllegalArgumentException("同名目录已存在：$name")
                     else -> existing
                 } ?: throw FileNotFoundException("无法创建文件：$name")
@@ -370,7 +378,7 @@ class WorkspaceRepository(private val context: Context) {
             copyRecursive(sourceFile, dstExisting)
         } else if (dstExisting == null && sourceFile.isFile) {
             // 目标名不存在，按目标名创建新文件
-            val outFile = dstParent.createFile(guessMime(dstName), dstName)
+            val outFile = createFileExact(dstParent, dstName)
                 ?: throw FileNotFoundException("无法创建文件：$dstName")
             context.contentResolver.openInputStream(sourceFile.uri).use { input ->
                 requireNotNull(input) { "无法读取源文件：$src" }
@@ -434,17 +442,77 @@ class WorkspaceRepository(private val context: Context) {
         return ext !in BINARY_EXTENSIONS
     }
 
+    /**
+     * 猜测 MIME 类型。
+     *
+     * **不要给源码文件返回 `text/plain`**：`DocumentsProvider` 会根据 MIME 反推
+     * 「规范扩展名」，见到 `text/plain` 就认为该文件应当叫 `*.txt`，于是把
+     * `test.py` 落盘成 `test.py.txt`。给它一个 provider 不认识的 MIME
+     * （如 `text/x-python`），它找不到对应扩展名，就会原样保留传入的 displayName。
+     */
     private fun guessMime(fileName: String): String = when (fileName.substringAfterLast('.', "").lowercase()) {
-        "txt", "md", "log" -> "text/plain"
+        "txt", "log" -> "text/plain"
+        "md", "markdown" -> "text/markdown"
         "json" -> "application/json"
         "xml" -> "text/xml"
         "html", "htm" -> "text/html"
-        "js" -> "application/javascript"
+        "js", "mjs", "cjs" -> "application/javascript"
+        "ts" -> "text/x-typescript"
         "css" -> "text/css"
-        "kt", "java", "py", "c", "cpp", "h", "go", "rs", "ts", "sh" -> "text/plain"
+        "csv" -> "text/csv"
+        "yaml", "yml" -> "text/x-yaml"
+        "toml" -> "text/x-toml"
+        "ini", "cfg", "conf", "properties" -> "text/x-ini"
+        "kt", "kts" -> "text/x-kotlin"
+        "java" -> "text/x-java"
+        "py" -> "text/x-python"
+        "c" -> "text/x-c"
+        "h", "hpp" -> "text/x-c-header"
+        "cpp", "cc", "cxx" -> "text/x-c++"
+        "cs" -> "text/x-csharp"
+        "go" -> "text/x-go"
+        "rs" -> "text/x-rust"
+        "rb" -> "text/x-ruby"
+        "php" -> "text/x-php"
+        "swift" -> "text/x-swift"
+        "lua" -> "text/x-lua"
+        "sql" -> "text/x-sql"
+        "sh", "bash", "zsh" -> "application/x-sh"
+        "bat", "cmd" -> "application/x-bat"
+        "gradle" -> "text/x-gradle"
         "png" -> "image/png"
         "jpg", "jpeg" -> "image/jpeg"
+        "gif" -> "image/gif"
+        "webp" -> "image/webp"
+        "svg" -> "image/svg+xml"
+        "pdf" -> "application/pdf"
+        "zip" -> "application/zip"
         else -> "application/octet-stream"
+    }
+
+    /**
+     * 创建文件，并**确保落盘名字与传入名字一致**。
+     *
+     * 部分 `DocumentsProvider`（尤其是国产 ROM 的文件管理器）会忽略 `displayName` 的
+     * 后半段，按 MIME 强行改名。这里在创建后回读实际名字，不一致就改回来，
+     * 这样无论 provider 怎么折腾，用户拿到的都是自己指定的文件名。
+     *
+     * @return 最终落盘的 [DocumentFile]；若改名失败，返回 provider 给出的那个（名字可能不符）。
+     */
+    private fun createFileExact(parent: DocumentFile, fileName: String): DocumentFile? {
+        val created = parent.createFile(guessMime(fileName), fileName) ?: return null
+        val actual = DocumentFile.fromSingleUri(context, created.uri)?.name
+        if (actual == null || actual == fileName) return created
+
+        // provider 私自改了名，尝试改回
+        return try {
+            val renamed = DocumentsContract.renameDocument(
+                context.contentResolver, created.uri, fileName
+            )
+            if (renamed != null) DocumentFile.fromSingleUri(context, renamed) ?: created else created
+        } catch (_: Exception) {
+            created
+        }
     }
 
     companion object {
