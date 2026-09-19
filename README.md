@@ -4,6 +4,8 @@
 
 **当前版本：v1.6.4**（versionCode 11）
 
+**中文** · [English](README.en.md)
+
 > 名字致敬 **OpenClaw**（那条「蜕壳成长」的太空龙虾 🦞）。本项目为独立实现，
 > 图标取自 OpenClaw 官方素材。
 >
