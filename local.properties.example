@@ -1,0 +1,6 @@
+# 本文件由 Android Studio 自动生成，不应提交到版本库。
+# 请改成你自己的 Android SDK 路径：
+#   Windows: sdk.dir=C\:\\Users\\你的用户名\\AppData\\Local\\Android\\Sdk
+#   macOS:   sdk.dir=/Users/你的用户名/Library/Android/sdk
+#   Linux:   sdk.dir=/home/你的用户名/Android/Sdk
+sdk.dir=/root/android-sdk

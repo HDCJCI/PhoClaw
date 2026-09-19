@@ -1,0 +1,39 @@
+# ---- Gradle ----
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# ---- Android 本地配置 ----
+# 里面是本机 SDK 路径，绝对不能提交
+local.properties
+
+# 签名文件。一旦泄露，任何人都能签出「官方」更新包
+*.jks
+*.keystore
+keystore.properties
+
+# ---- IDE ----
+*.iml
+.idea/
+.vscode/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# ---- Kotlin ----
+.kotlin/
+
+# ---- 系统 ----
+.DS_Store
+Thumbs.db
+
+# ---- 构建产物 ----
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+output.json
+
+# ---- 日志 ----
+*.log

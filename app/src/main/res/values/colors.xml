@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- OpenClaw 官方品牌色 Claw Red -->
+    <color name="ic_launcher_background">#ff5a50</color>
+</resources>

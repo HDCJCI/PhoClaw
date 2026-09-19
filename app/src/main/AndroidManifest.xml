@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- 自动化任务：执行完发结果通知（Android 13+ 需要运行时申请） -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!--
+      精确闹钟。两个都声明是刻意的：
+      - USE_EXACT_ALARM（API 33+）由系统自动授予，无需用户操作
+      - SCHEDULE_EXACT_ALARM（API 31-32）需要用户手动授权
+      优先用前者能最大程度免掉授权麻烦，授权不了时自动降级为不精确闹钟，
+      任务照跑，只是时间可能偏十几分钟。
+    -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+
+    <!-- 重启 / 改时间后重建闹钟，否则任务会永久静默失效 -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <!-- 任务执行可能超过 10 秒，必须用前台服务承载 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+
+    <application
+        android:name=".PhoClawApp"
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.PhoClaw"
+        android:usesCleartextTraffic="false">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|keyboardHidden|uiMode"
+            android:windowSoftInputMode="adjustResize"
+            android:theme="@style/Theme.PhoClaw">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+          自动化任务执行服务。
+          dataSync 类型：任务是「把本地数据同步到远端 API」的语义，
+          恰好对应这个类型，不需要额外申请敏感的前台服务权限。
+        -->
+        <service
+            android:name=".auto.AutomationService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!-- 闹钟触发的入口，只接受应用内部广播（exported=false） -->
+        <receiver
+            android:name=".auto.AutomationReceiver"
+            android:exported="false" />
+
+        <!--
+          开机等系统事件。这个必须是 exported=true ——
+          BOOT_COMPLETED 是系统发出的广播，不接受外部来源就收不到。
+          没有权限风险：接收器只读自己的存储，不做任何对外操作。
+        -->
+        <receiver
+            android:name=".auto.BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.TIME_SET" />
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+            </intent-filter>
+        </receiver>
+    </application>
+
+</manifest>
