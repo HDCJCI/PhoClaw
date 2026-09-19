@@ -1,8 +1,10 @@
 # PhoClaw
 
-一个可在手机上运行、能对话并直接读写工作区文件的 Android 应用。~~本来想做网关的~~（感谢WorkBuddy编写以及编译）
+一个可在手机上运行、能对话并直接读写工作区文件的 Android 应用。
 
 **当前版本：v1.6.4**（versionCode 11）
+
+**中文** · [English](README.en.md)
 
 > 它**不包含任何硬件连接、蓝牙/WiFi 配网、元件控制功能**——只有两件事：
 > **写代码** 和 **聊天**。
@@ -612,9 +614,8 @@ executeCommands()      →  delete/move 先弹确认框，其余直接执行
 
 ## 图标
 
-感谢OpenClaw的图标
 取自 OpenClaw 官方仓库 `apps/android/app/src/main/res/`，吉祥物 **Molty**。
-自适应图标背景使用官方色 Claw Red `#ff5a50`。
+自适应图标背景使用官方品牌色 Claw Red `#ff5a50`。
 
 ---
 
