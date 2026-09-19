@@ -6,29 +6,8 @@ An Android app that runs on your phone, holds a conversation, and reads/writes f
 
 [中文](README.md) · **English**
 
-> Named after **OpenClaw** (the space lobster that grows by shedding its shell 🦞).
-> This is an independent implementation; the icon is taken from OpenClaw's official assets.
->
 > It contains **no hardware connectivity, no Bluetooth/Wi-Fi provisioning, no component
 > control** — just two things: **writing code** and **chatting**.
-
----
-
-## Version history
-
-| Version | versionCode | Changes |
-|---|---|---|
-| **1.6.4** | 11 | **Fix: workspace could not be changed.** v1.5.0 replaced the four top-bar icons with a bottom navigation bar and accidentally deleted the "Select workspace" button from the chat top bar — it only appeared when no workspace was chosen, so once you picked one there was no way back. Settings now has a **Workspace** section at the top (shows current directory + a change button), and the Files screen has an inline change button. Switching resets you to the new workspace root. |
-| **1.6.3** | 10 | **Fix: UI pushed off-screen.** v1.6.2 hand-computed `max(bottomBarHeight, imeHeight)` incorrectly, shoving all content out of the visible area and leaving a black screen. Reverted to Compose-managed insets: the outer `AppRoot` uses `padding(bottomBar)` + `consumeWindowInsets(padding)` + `imePadding()`, so the IME inset only fills the *difference* rather than summing; inner screens no longer handle insets themselves. |
-| **1.6.2** | 9 | **Fix: blank gap between the bottom bar and keyboard.** v1.6.1 made the bottom bar consume `safeDrawing`, so both the bar and the content area stepped aside, leaving a gap as tall as "bottom bar + navigation bar". The bar now uses default insets (stays put) and the content area takes `max(bottomBarHeight, imeHeight)` — avoiding the bar when the keyboard is closed, avoiding the keyboard when it's open, **never summing**. |
-| **1.6.1** | 8 | **Fix: IME covering the input field.** Under edge-to-edge, `adjustResize` no longer shrinks the window, so the keyboard completely covered the input box. The bottom bar now consumes `safeDrawing` insets (including IME height) and the content area follows. Also: auto-scroll to the newest message when the keyboard opens; all inner Scaffolds zeroed their insets to avoid double-counting with the outer layer. |
-| **1.6.0** | 7 | **Web search.** A Tavily API key can be set in Settings; new `websearch` command lets the AI verify time-sensitive facts (news, stock prices, weather, latest version numbers) on its own and cite sources. Results return an integrated summary plus URL-bearing page snippets; long bodies are truncated to 1200 chars to control context usage. With no key configured the command is explicitly refused and the model is told "don't retry, answer from existing knowledge". Works in **both** chat and scheduled tasks. HTTP errors are explained per-status (401/403/429/5xx). |
-| **1.5.0** | 6 | **Skills + Automation.** Import local skill files (`.md` frontmatter / `.json`); a skill = prompt + command allowlist. Once active, its prompt is injected into the system message and out-of-allowlist commands are intercepted before execution. New scheduled tasks (title / summary / natural-language prompt / cron); run unattended in the background and notify on completion. Hand-written cron parser supports 5- and 6-field expressions, day-of-month OR day-of-week semantics, and live "next trigger" preview. Top-bar icons replaced by a **bottom navigation bar** (Chat / Files / Skills / Automation / Settings). |
-| **1.4.0** | 5 | **Image and code-file attachments.** A "+" button in the input bar allows mixing images with text/code files. Images are compressed (long edge 1568px, JPEG 85) and sent over the multimodal `image_url` channel; text file contents are inlined into context. New "model supports vision" toggle (off by default). Attachments live in `files/attachments/`; conversation JSON stores references only. Includes orphan cleanup and a soft directory size cap. |
-| **1.3.0** | 4 | **Local conversation storage.** Conversations auto-save to disk; new history screen to view/switch/delete past conversations. The last conversation is restored on cold start. Titles are generated from the first message. Forced flush when backgrounded. |
-| **1.2.0** | 3 | **Markdown rendering** in chat messages: headings, bold/italic, inline code, code blocks (horizontal scroll + language label), ordered/unordered lists, blockquotes, tables (auto column widths + horizontal scroll), rules, links. Hand-written lightweight parser, no new dependencies. |
-| **1.1.0** | 2 | File operations expanded from 5 to 11: added `copy` / `move` / `append` / `search` / `tree` / `info` plus aliases (`cp`/`mv`/`rm`/`ls`/`grep`/`stat`/`md`); confirmation dialogs before `delete` and `move`; 512 KB per-file read limit and binary skipping in search; tool-call rounds 4 → 8. |
-| **1.0.0** | 1 | First usable release: streaming chat, workspace read/write, encrypted credential storage, Base URL correction. |
 
 ---
 
