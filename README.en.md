@@ -4,7 +4,7 @@ An Android app that runs on your phone, holds a conversation, and reads/writes f
 
 **Current version: v1.6.4** (versionCode 11)
 
-[中文文档](README.md) · **English**
+[中文](README.md) · **English**
 
 > Named after **OpenClaw** (the space lobster that grows by shedding its shell 🦞).
 > This is an independent implementation; the icon is taken from OpenClaw's official assets.
