@@ -1,6 +1,6 @@
 # PhoClaw
 
-An Android app that runs on your phone, holds a conversation, and reads/writes files in your workspace directly.
+An Android app that runs on your phone, holds a conversation, and reads/writes files in your workspace directly.(Just software made out of boredom)
 
 **Current version: v1.6.4** (versionCode 11)
 
