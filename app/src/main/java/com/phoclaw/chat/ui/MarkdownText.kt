@@ -52,36 +52,35 @@ fun MarkdownText(
     modifier: Modifier = Modifier,
     fontSize: androidx.compose.ui.unit.TextUnit = 14.sp
 ) {
-    val blocks = remember(markdown) { MarkdownParser.parse(markdown) }
+    val parsed = remember(markdown) { MarkdownParser.parseWithRefs(markdown) }
 
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        blocks.forEach { block -> BlockView(block, fontSize) }
+        parsed.blocks.forEach { block -> BlockView(block, parsed.refs, fontSize) }
     }
 }
 
 @Composable
-private fun BlockView(block: Block, fontSize: androidx.compose.ui.unit.TextUnit) {
+private fun BlockView(
+    block: Block,
+    refs: Map<String, String>,
+    fontSize: androidx.compose.ui.unit.TextUnit
+) {
     when (block) {
         is Block.Paragraph -> {
             // 整段就是一个图片时，直接渲染图片而不是「图 + 灰字占位」
-            val onlyImage = remember(block.text) {
-                val spans = MarkdownParser.parseInline(block.text)
-                if (spans.size == 1 && spans.first() is Span.Image) spans.first() as Span.Image else null
-            }
+            val spans = remember(block.text, refs) { MarkdownParser.parseInline(block.text, refs) }
+            val onlyImage = spans.singleOrNull() as? Span.Image
             if (onlyImage != null) {
                 MarkdownImage(onlyImage.url, onlyImage.alt)
             } else {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(
-                        text = inline(block.text),
+                        text = inline(block.text, refs),
                         fontSize = fontSize,
                         lineHeight = fontSize * 1.45f
                     )
                     // 段落里混排的图片（文字 + 图片同行）单独放在下方展示
-                    val images = remember(block.text) {
-                        MarkdownParser.parseInline(block.text).filterIsInstance<Span.Image>()
-                    }
-                    images.forEach { MarkdownImage(it.url, it.alt) }
+                    spans.filterIsInstance<Span.Image>().forEach { MarkdownImage(it.url, it.alt) }
                 }
             }
         }
@@ -93,7 +92,7 @@ private fun BlockView(block: Block, fontSize: androidx.compose.ui.unit.TextUnit)
                 else -> fontSize * 1.08f
             }
             Text(
-                text = inline(block.text),
+                text = inline(block.text, refs),
                 fontSize = size,
                 fontWeight = FontWeight.Bold,
                 lineHeight = size * 1.4f
@@ -141,7 +140,7 @@ private fun BlockView(block: Block, fontSize: androidx.compose.ui.unit.TextUnit)
                 modifier = Modifier.width(22.dp)
             )
             Text(
-                text = inline(block.text),
+                text = inline(block.text, refs),
                 fontSize = fontSize,
                 lineHeight = fontSize * 1.45f,
                 modifier = Modifier.weight(1f)
@@ -161,7 +160,7 @@ private fun BlockView(block: Block, fontSize: androidx.compose.ui.unit.TextUnit)
                 modifier = Modifier.width(24.dp)
             )
             Text(
-                text = inline(block.text),
+                text = inline(block.text, refs),
                 fontSize = fontSize,
                 lineHeight = fontSize * 1.45f,
                 // 已完成的项加删除线 + 淡化，一眼能看出进度
@@ -184,7 +183,7 @@ private fun BlockView(block: Block, fontSize: androidx.compose.ui.unit.TextUnit)
             )
             Spacer(Modifier.width(8.dp))
             Text(
-                text = inline(block.text),
+                text = inline(block.text, refs),
                 fontSize = fontSize * 0.95f,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontStyle = FontStyle.Italic,
@@ -193,7 +192,7 @@ private fun BlockView(block: Block, fontSize: androidx.compose.ui.unit.TextUnit)
             )
         }
 
-        is Block.Table -> MarkdownTable(block, fontSize)
+        is Block.Table -> MarkdownTable(block, refs, fontSize)
 
         Block.Divider -> Box(
             Modifier
@@ -207,7 +206,11 @@ private fun BlockView(block: Block, fontSize: androidx.compose.ui.unit.TextUnit)
 
 /** 表格：列宽按内容自适应，整体可横向滚动。 */
 @Composable
-private fun MarkdownTable(table: Block.Table, fontSize: androidx.compose.ui.unit.TextUnit) {
+private fun MarkdownTable(
+    table: Block.Table,
+    refs: Map<String, String>,
+    fontSize: androidx.compose.ui.unit.TextUnit
+) {
     val colCount = maxOf(table.header.size, table.rows.maxOfOrNull { it.size } ?: 0)
     if (colCount == 0) return
 
@@ -237,7 +240,8 @@ private fun MarkdownTable(table: Block.Table, fontSize: androidx.compose.ui.unit
                         text = cell,
                         widthChars = widths.getOrElse(i) { 8 },
                         fontSize = fontSize,
-                        bold = true
+                        bold = true,
+                        refs = refs
                     )
                 }
             }
@@ -255,7 +259,8 @@ private fun MarkdownTable(table: Block.Table, fontSize: androidx.compose.ui.unit
                             text = row.getOrNull(i).orEmpty(),
                             widthChars = widths.getOrElse(i) { 8 },
                             fontSize = fontSize,
-                            bold = false
+                            bold = false,
+                            refs = refs
                         )
                     }
                 }
@@ -269,10 +274,11 @@ private fun TableCell(
     text: String,
     widthChars: Int,
     fontSize: androidx.compose.ui.unit.TextUnit,
-    bold: Boolean
+    bold: Boolean,
+    refs: Map<String, String> = emptyMap()
 ) {
     Text(
-        text = inline(text),
+        text = inline(text, refs),
         fontSize = fontSize * 0.9f,
         fontWeight = if (bold) FontWeight.SemiBold else FontWeight.Normal,
         lineHeight = fontSize * 1.3f,
@@ -287,8 +293,8 @@ private fun TableCell(
  * 链接用 Compose 的 [withLink] 注册真实可点击区域 —— 只给 SpanStyle 上色
  * 的话文字看着像链接但点不动。点击后交给系统浏览器打开。 */
 @Composable
-private fun inline(text: String): AnnotatedString {
-    val spans = remember(text) { MarkdownParser.parseInline(text) }
+private fun inline(text: String, refs: Map<String, String> = emptyMap()): AnnotatedString {
+    val spans = remember(text, refs) { MarkdownParser.parseInline(text, refs) }
     val codeBg = MaterialTheme.colorScheme.surfaceVariant
     val linkColor = MaterialTheme.colorScheme.primary
 
@@ -365,22 +371,28 @@ private fun MarkdownImage(url: String, alt: String) {
     val isRemote = url.startsWith("http://") || url.startsWith("https://")
 
     if (!isRemote) {
-        ImagePlaceholder(alt = alt.ifBlank { "图片" }, hint = "不支持的图片地址")
+        // 本地路径目前读不了（工作区文件不在 App 可直接访问的沙箱里），
+        // 把原地址显示出来，用户至少知道这里本该有张图
+        ImagePlaceholder(
+            alt = alt.ifBlank { "图片" },
+            hint = "本地地址暂不支持显示"
+        )
         return
     }
 
     var loading by remember(url) { mutableStateOf(true) }
     var bitmap by remember(url) { mutableStateOf<android.graphics.Bitmap?>(null) }
-    var failed by remember(url) { mutableStateOf(false) }
+    var error by remember(url) { mutableStateOf<String?>(null) }
 
     LaunchedEffect(url) {
         val cached = ImageCache.get(url)
         if (cached != null) {
             bitmap = cached; loading = false
         } else {
-            val bmp = ImageLoader.load(url)
-            bitmap = bmp
-            failed = bmp == null
+            when (val r = ImageLoader.load(url)) {
+                is ImageLoader.Result.Ok -> bitmap = r.bitmap
+                is ImageLoader.Result.Fail -> error = r.reason
+            }
             loading = false
         }
     }
@@ -388,15 +400,15 @@ private fun MarkdownImage(url: String, alt: String) {
     when {
         loading -> ImagePlaceholder(alt = alt.ifBlank { "图片" }, hint = "加载中…")
 
-        failed || bitmap == null -> ImagePlaceholder(
+        error != null -> ImagePlaceholder(
             alt = alt.ifBlank { "图片" },
-            hint = "点此用浏览器打开",
+            hint = "$error · 点此用浏览器打开",
             // 失败时给个可点的入口，用户能自己去浏览器看
             onClick = { openUrl(context, url) }
         )
 
         else -> {
-            val bmp = bitmap!!
+            val bmp = bitmap ?: return
             Surface(
                 color = MaterialTheme.colorScheme.surface,
                 shape = RoundedCornerShape(10.dp),
@@ -482,39 +494,62 @@ private object ImageCache {
     }
 }
 
-/** 用 OkHttp 拉取图片并解码。 */
+/** 用 OkHttp 拉取图片并解码。
+ *
+ * 返回带失败原因的结果，而不是裸 null —— 加载不出来时用户能一眼看出
+ * 是网络不通、404、还是解码失败，省得干瞪眼。 */
 private object ImageLoader {
     private val client by lazy {
         okhttp3.OkHttpClient.Builder()
             .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
             .readTimeout(25, java.util.concurrent.TimeUnit.SECONDS)
+            // 跟随重定向，很多图床会用 302 跳转
+            .followRedirects(true)
             .build()
     }
 
     /** 单张图最大 12 MB，防止把内存吃爆。 */
     private const val MAX_BYTES = 12 * 1024 * 1024
 
-    suspend fun load(url: String): android.graphics.Bitmap? = withContext(Dispatchers.IO) {
+    sealed interface Result {
+        data class Ok(val bitmap: android.graphics.Bitmap) : Result
+        data class Fail(val reason: String) : Result
+    }
+
+    suspend fun load(url: String): Result = withContext(Dispatchers.IO) {
         try {
             val request = okhttp3.Request.Builder()
                 .url(url)
                 // 部分图床会校验 Referer / UA，带上更稳
                 .header("User-Agent", "Mozilla/5.0 (Android) PhoClaw")
+                .header("Accept", "image/*,*/*;q=0.8")
                 .build()
 
             client.newCall(request).execute().use { resp ->
-                if (!resp.isSuccessful) return@withContext null
-                val body = resp.body ?: return@withContext null
-                if (body.contentLength() > MAX_BYTES) return@withContext null
+                if (!resp.isSuccessful) return@withContext Result.Fail("服务器返回 ${resp.code}")
+
+                val body = resp.body ?: return@withContext Result.Fail("响应为空")
+                if (body.contentLength() > MAX_BYTES) return@withContext Result.Fail("图片超过 12 MB")
                 val bytes = body.bytes()
-                if (bytes.size > MAX_BYTES) return@withContext null
+                if (bytes.isEmpty()) return@withContext Result.Fail("内容为空")
+                if (bytes.size > MAX_BYTES) return@withContext Result.Fail("图片超过 12 MB")
 
                 val bmp = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                if (bmp != null) ImageCache.put(url, bmp)
-                bmp
+                    ?: return@withContext Result.Fail("不是可识别的图片格式")
+
+                ImageCache.put(url, bmp)
+                Result.Ok(bmp)
             }
-        } catch (_: Exception) {
-            null
+        } catch (e: java.net.SocketTimeoutException) {
+            Result.Fail("连接超时")
+        } catch (e: java.net.UnknownHostException) {
+            Result.Fail("域名解析失败")
+        } catch (e: javax.net.ssl.SSLException) {
+            Result.Fail("HTTPS 握手失败")
+        } catch (e: java.io.IOException) {
+            Result.Fail("网络错误")
+        } catch (e: Exception) {
+            Result.Fail("加载失败")
         }
     }
 }

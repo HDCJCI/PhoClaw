@@ -2,7 +2,7 @@
 
 An Android app that runs on your phone, holds a conversation, and reads/writes files in your workspace directly.
 
-**Current version: v1.6.6** (versionCode 13)
+**Current version: v1.6.7** (versionCode 14)
 
 [中文文档](README.md) · **English**
 
@@ -18,6 +18,7 @@ An Android app that runs on your phone, holds a conversation, and reads/writes f
 
 | Version | versionCode | Changes |
 |---|---|---|
+| **1.6.7** | 14 | **Links and images, finished.** Two remaining gaps closed: (1) **Reference-style links** `[text][id]` with `[id]: url` definitions at the end of the document (plus the `[text][]` and bare `[id]` shorthand forms), and **bare-URL autolinking** — `https://example.com` becomes tappable on its own, with trailing CJK and ASCII punctuation stripped so the period never ends up inside the URL. (2) **Diagnosable image failures** — instead of a generic "tap to open in browser" the placeholder now reports the actual cause (`server returned 404`, `connection timed out`, `DNS lookup failed`, `HTTPS handshake failed`, `image exceeds 12 MB`, `unrecognised image format`), and the loader follows redirects and sends `Accept: image/*`, so image hosts that 302 now resolve properly. |
 | **1.6.6** | 13 | **Complete Markdown rendering.** Added bold-italic `***x***`, strikethrough `~~x~~`, underline `<u>x</u>`, task lists `- [ ]` / `- [x]` (checked items are struck through and dimmed), and images `![alt](url)` (fetched and decoded via OkHttp with an in-memory cache — no new dependency). Backslash escapes (`\*`) now work. **Links are clickable** — previously they were only coloured and did nothing; they now register a real hit area via `LinkAnnotation.Url` and open the system browser. Failed image loads show a placeholder that can be tapped to open in a browser. |
 | **1.6.5** | 12 | **Fix: file extensions were being swallowed.** The AI asked for `test.py` and got `test.py.txt`. Root cause: `guessMime()` mapped every source-code extension to `text/plain`, and a `DocumentsProvider` reading `text/plain` concludes "the canonical extension for plain text is `.txt`" and appends it. Now 30+ extensions return their real MIME type (`.py`→`text/x-python`, `.kt`→`text/x-kotlin`, `.sh`→`application/x-sh`, …), so the provider finds no matching extension and keeps the name you passed. A fallback layer reads the actual name back after creation and, if the provider renamed it anyway, calls `DocumentsContract.renameDocument()` to restore it and tells the user. The default prompt also gained a rule: always write the full extension when creating source files. |
 | **1.6.4** | 11 | **Fix: workspace could not be changed.** v1.5.0 replaced the four top-bar icons with a bottom navigation bar and accidentally deleted the "Select workspace" button from the chat top bar — it only appeared when no workspace was chosen, so once you picked one there was no way back. Settings now has a **Workspace** section at the top (shows current directory + a change button), and the Files screen has an inline change button. Switching resets you to the new workspace root. |
