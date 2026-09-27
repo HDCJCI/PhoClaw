@@ -451,12 +451,19 @@ class WorkspaceRepository(private val context: Context) {
      * （如 `text/x-python`），它找不到对应扩展名，就会原样保留传入的 displayName。
      */
     private fun guessMime(fileName: String): String = when (fileName.substringAfterLast('.', "").lowercase()) {
-        "txt", "log" -> "text/plain"
+        // 注意：`text/plain` 也不能给 `.log`，否则会被 provider 改名为 `.txt`。
+        // 只有「MIME 反查出的规范扩展名 == 本扩展名」时才可安全使用标准 MIME，
+        // 否则一律给浏览器/编辑器通用的 `text/x-*`、`application/x-*` 形式。
+        "txt" -> "text/plain"
+        "log" -> "text/x-log"
         "md", "markdown" -> "text/markdown"
         "json" -> "application/json"
         "xml" -> "text/xml"
-        "html", "htm" -> "text/html"
-        "js", "mjs", "cjs" -> "application/javascript"
+        "html" -> "text/html"
+        "htm" -> "text/x-html"
+        "js" -> "application/javascript"
+        "mjs" -> "text/x-javascript-esm"
+        "cjs" -> "text/x-javascript-cjs"
         "ts" -> "text/x-typescript"
         "css" -> "text/css"
         "csv" -> "text/csv"
@@ -477,11 +484,15 @@ class WorkspaceRepository(private val context: Context) {
         "swift" -> "text/x-swift"
         "lua" -> "text/x-lua"
         "sql" -> "text/x-sql"
-        "sh", "bash", "zsh" -> "application/x-sh"
-        "bat", "cmd" -> "application/x-bat"
+        "sh" -> "application/x-sh"
+        "bash" -> "text/x-shellscript-bash"
+        "zsh" -> "text/x-shellscript-zsh"
+        "bat" -> "application/x-bat"
+        "cmd" -> "text/x-batch-cmd"
         "gradle" -> "text/x-gradle"
         "png" -> "image/png"
-        "jpg", "jpeg" -> "image/jpeg"
+        "jpg" -> "image/jpeg"
+        "jpeg" -> "text/x-image-jpeg"
         "gif" -> "image/gif"
         "webp" -> "image/webp"
         "svg" -> "image/svg+xml"

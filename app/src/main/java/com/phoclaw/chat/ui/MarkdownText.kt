@@ -1,6 +1,8 @@
 package com.phoclaw.chat.ui
 
+import android.content.Intent
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -9,22 +11,35 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.phoclaw.chat.util.MarkdownParser
 import com.phoclaw.chat.util.MarkdownParser.Block
 import com.phoclaw.chat.util.MarkdownParser.Span
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * 把 Markdown 文本渲染成 Compose 组件。
@@ -47,11 +62,29 @@ fun MarkdownText(
 @Composable
 private fun BlockView(block: Block, fontSize: androidx.compose.ui.unit.TextUnit) {
     when (block) {
-        is Block.Paragraph -> Text(
-            text = inline(block.text),
-            fontSize = fontSize,
-            lineHeight = fontSize * 1.45f
-        )
+        is Block.Paragraph -> {
+            // 整段就是一个图片时，直接渲染图片而不是「图 + 灰字占位」
+            val onlyImage = remember(block.text) {
+                val spans = MarkdownParser.parseInline(block.text)
+                if (spans.size == 1 && spans.first() is Span.Image) spans.first() as Span.Image else null
+            }
+            if (onlyImage != null) {
+                MarkdownImage(onlyImage.url, onlyImage.alt)
+            } else {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        text = inline(block.text),
+                        fontSize = fontSize,
+                        lineHeight = fontSize * 1.45f
+                    )
+                    // 段落里混排的图片（文字 + 图片同行）单独放在下方展示
+                    val images = remember(block.text) {
+                        MarkdownParser.parseInline(block.text).filterIsInstance<Span.Image>()
+                    }
+                    images.forEach { MarkdownImage(it.url, it.alt) }
+                }
+            }
+        }
 
         is Block.Heading -> {
             val size = when (block.level) {
@@ -111,6 +144,30 @@ private fun BlockView(block: Block, fontSize: androidx.compose.ui.unit.TextUnit)
                 text = inline(block.text),
                 fontSize = fontSize,
                 lineHeight = fontSize * 1.45f,
+                modifier = Modifier.weight(1f)
+            )
+        }
+
+        is Block.TaskItem -> Row(
+            Modifier.fillMaxWidth().padding(vertical = 1.dp),
+            verticalAlignment = Alignment.Top
+        ) {
+            // 用 ☑ / ☐ 两个字符当勾选框：零依赖，各平台字体都自带
+            Text(
+                text = if (block.checked) "☑" else "☐",
+                fontSize = fontSize,
+                color = if (block.checked) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.width(24.dp)
+            )
+            Text(
+                text = inline(block.text),
+                fontSize = fontSize,
+                lineHeight = fontSize * 1.45f,
+                // 已完成的项加删除线 + 淡化，一眼能看出进度
+                textDecoration = if (block.checked) TextDecoration.LineThrough else null,
+                color = if (block.checked) MaterialTheme.colorScheme.onSurfaceVariant
+                else Color.Unspecified,
                 modifier = Modifier.weight(1f)
             )
         }
@@ -225,7 +282,10 @@ private fun TableCell(
     )
 }
 
-/** 把行内片段组合成 AnnotatedString。 */
+/** 把行内片段组合成 AnnotatedString。
+ *
+ * 链接用 Compose 的 [withLink] 注册真实可点击区域 —— 只给 SpanStyle 上色
+ * 的话文字看着像链接但点不动。点击后交给系统浏览器打开。 */
 @Composable
 private fun inline(text: String): AnnotatedString {
     val spans = remember(text) { MarkdownParser.parseInline(text) }
@@ -237,12 +297,27 @@ private fun inline(text: String): AnnotatedString {
             spans.forEach { span ->
                 when (span) {
                     is Span.Plain -> append(span.text)
+
                     is Span.Bold -> withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
                         append(span.text)
                     }
+
                     is Span.Italic -> withStyle(SpanStyle(fontStyle = FontStyle.Italic)) {
                         append(span.text)
                     }
+
+                    is Span.BoldItalic -> withStyle(
+                        SpanStyle(fontWeight = FontWeight.Bold, fontStyle = FontStyle.Italic)
+                    ) { append(span.text) }
+
+                    is Span.Strikethrough -> withStyle(
+                        SpanStyle(textDecoration = TextDecoration.LineThrough)
+                    ) { append(span.text) }
+
+                    is Span.Underline -> withStyle(
+                        SpanStyle(textDecoration = TextDecoration.Underline)
+                    ) { append(span.text) }
+
                     is Span.Code -> withStyle(
                         SpanStyle(
                             fontFamily = FontFamily.Monospace,
@@ -250,11 +325,196 @@ private fun inline(text: String): AnnotatedString {
                             fontSize = 13.sp
                         )
                     ) { append(span.text) }
-                    is Span.Link -> withStyle(
-                        SpanStyle(color = linkColor, fontWeight = FontWeight.Medium)
+
+                    is Span.Link -> withLink(
+                        LinkAnnotation.Url(
+                            url = span.url,
+                            styles = TextLinkStyles(
+                                style = SpanStyle(
+                                    color = linkColor,
+                                    fontWeight = FontWeight.Medium,
+                                    textDecoration = TextDecoration.Underline
+                                )
+                            )
+                        )
                     ) { append(span.text) }
+
+                    // 图片单独由 MarkdownImage 渲染，这里只保留 alt 文字占位，
+                    // 避免同一个位置既画图又画字
+                    is Span.Image -> append(span.alt)
                 }
             }
+        }
+    }
+}
+
+// ==================================================================== 图片渲染
+
+/**
+ * Markdown 图片。
+ *
+ * 为什么不引 Coil：本项目在离线环境构建，加新依赖会导致构建失败。
+ * 这里用已有的 OkHttp 下载字节流，交给 BitmapFactory 解码，
+ * 结果缓存在一个简单的内存 LRU 里 —— 图片数量不多，够用。
+ *
+ * 只支持 http(s) 网络图片；其他协议显示占位提示。
+ */
+@Composable
+private fun MarkdownImage(url: String, alt: String) {
+    val context = LocalContext.current
+    val isRemote = url.startsWith("http://") || url.startsWith("https://")
+
+    if (!isRemote) {
+        ImagePlaceholder(alt = alt.ifBlank { "图片" }, hint = "不支持的图片地址")
+        return
+    }
+
+    var loading by remember(url) { mutableStateOf(true) }
+    var bitmap by remember(url) { mutableStateOf<android.graphics.Bitmap?>(null) }
+    var failed by remember(url) { mutableStateOf(false) }
+
+    LaunchedEffect(url) {
+        val cached = ImageCache.get(url)
+        if (cached != null) {
+            bitmap = cached; loading = false
+        } else {
+            val bmp = ImageLoader.load(url)
+            bitmap = bmp
+            failed = bmp == null
+            loading = false
+        }
+    }
+
+    when {
+        loading -> ImagePlaceholder(alt = alt.ifBlank { "图片" }, hint = "加载中…")
+
+        failed || bitmap == null -> ImagePlaceholder(
+            alt = alt.ifBlank { "图片" },
+            hint = "点此用浏览器打开",
+            // 失败时给个可点的入口，用户能自己去浏览器看
+            onClick = { openUrl(context, url) }
+        )
+
+        else -> {
+            val bmp = bitmap!!
+            Surface(
+                color = MaterialTheme.colorScheme.surface,
+                shape = RoundedCornerShape(10.dp),
+                border = androidx.compose.foundation.BorderStroke(
+                    1.dp, MaterialTheme.colorScheme.outlineVariant
+                )
+            ) {
+                androidx.compose.foundation.Image(
+                    bitmap = bmp.asImageBitmap(),
+                    contentDescription = alt.ifBlank { "图片" },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(3.dp)
+                        .clickable { openUrl(context, url) },
+                    contentScale = ContentScale.FillWidth
+                )
+            }
+        }
+    }
+}
+
+/** 图片占位框：显示 alt 文字与状态说明，[onClick] 非空时可点。 */
+@Composable
+private fun ImagePlaceholder(alt: String, hint: String, onClick: (() -> Unit)? = null) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+        shape = RoundedCornerShape(10.dp),
+        border = androidx.compose.foundation.BorderStroke(
+            1.dp, MaterialTheme.colorScheme.outlineVariant
+        ),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .padding(vertical = 20.dp, horizontal = 14.dp)
+                .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Text(text = "🖼", fontSize = 22.sp)
+            Text(
+                text = alt,
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontWeight = FontWeight.Medium
+            )
+            Text(
+                text = hint,
+                fontSize = 10.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+            )
+        }
+    }
+}
+
+/** 交给系统打开链接。 */
+private fun openUrl(context: android.content.Context, url: String) {
+    try {
+        val intent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url))
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        context.startActivity(intent)
+    } catch (_: Exception) {
+        // 没有浏览器或链接无法解析时静默失败，不打断阅读
+    }
+}
+
+/** 图片内存缓存。上限 24 张，按插入顺序淘汰最早的。 */
+private object ImageCache {
+    private const val MAX = 24
+    private val map = object : LinkedHashMap<String, android.graphics.Bitmap>(MAX, 0.75f, false) {
+        override fun removeEldestEntry(
+            eldest: MutableMap.MutableEntry<String, android.graphics.Bitmap>?
+        ) = size > MAX
+    }
+
+    @Synchronized
+    fun get(key: String): android.graphics.Bitmap? = map[key]
+
+    @Synchronized
+    fun put(key: String, value: android.graphics.Bitmap) {
+        map[key] = value
+    }
+}
+
+/** 用 OkHttp 拉取图片并解码。 */
+private object ImageLoader {
+    private val client by lazy {
+        okhttp3.OkHttpClient.Builder()
+            .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(25, java.util.concurrent.TimeUnit.SECONDS)
+            .build()
+    }
+
+    /** 单张图最大 12 MB，防止把内存吃爆。 */
+    private const val MAX_BYTES = 12 * 1024 * 1024
+
+    suspend fun load(url: String): android.graphics.Bitmap? = withContext(Dispatchers.IO) {
+        try {
+            val request = okhttp3.Request.Builder()
+                .url(url)
+                // 部分图床会校验 Referer / UA，带上更稳
+                .header("User-Agent", "Mozilla/5.0 (Android) PhoClaw")
+                .build()
+
+            client.newCall(request).execute().use { resp ->
+                if (!resp.isSuccessful) return@withContext null
+                val body = resp.body ?: return@withContext null
+                if (body.contentLength() > MAX_BYTES) return@withContext null
+                val bytes = body.bytes()
+                if (bytes.size > MAX_BYTES) return@withContext null
+
+                val bmp = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                if (bmp != null) ImageCache.put(url, bmp)
+                bmp
+            }
+        } catch (_: Exception) {
+            null
         }
     }
 }
