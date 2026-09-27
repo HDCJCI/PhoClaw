@@ -1,6 +1,7 @@
 package com.phoclaw.chat.ui
 
 import android.content.Intent
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -18,8 +19,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
@@ -91,12 +96,17 @@ private fun BlockView(
                 2 -> fontSize * 1.2f
                 else -> fontSize * 1.08f
             }
-            Text(
-                text = inline(block.text, refs),
-                fontSize = size,
-                fontWeight = FontWeight.Bold,
-                lineHeight = size * 1.4f
-            )
+            Column {
+                Text(
+                    text = inline(block.text, refs),
+                    fontSize = size,
+                    fontWeight = FontWeight.Bold,
+                    lineHeight = size * 1.4f
+                )
+                remember(block.text, refs) { MarkdownParser.parseInline(block.text, refs) }
+                    .filterIsInstance<Span.Image>()
+                    .forEach { MarkdownImage(it.url, it.alt) }
+            }
         }
 
         is Block.CodeBlock -> {
@@ -139,26 +149,34 @@ private fun BlockView(
                 fontWeight = FontWeight.Medium,
                 modifier = Modifier.width(22.dp)
             )
-            Text(
-                text = inline(block.text, refs),
-                fontSize = fontSize,
-                lineHeight = fontSize * 1.45f,
-                modifier = Modifier.weight(1f)
-            )
+            // 列表项内部也可能嵌图片（`- 图片：![x](url)`），
+            // 只调 inline() 的话图片会退化成 alt 文字，这里和段落一样补上渲染
+            val spans = remember(block.text, refs) { MarkdownParser.parseInline(block.text, refs) }
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = inline(block.text, refs),
+                    fontSize = fontSize,
+                    lineHeight = fontSize * 1.45f
+                )
+                spans.filterIsInstance<Span.Image>().forEach { MarkdownImage(it.url, it.alt) }
+            }
         }
 
         is Block.TaskItem -> Row(
-            Modifier.fillMaxWidth().padding(vertical = 1.dp),
+            Modifier.fillMaxWidth().padding(vertical = 2.dp),
             verticalAlignment = Alignment.Top
         ) {
-            // 用 ☑ / ☐ 两个字符当勾选框：零依赖，各平台字体都自带
-            Text(
-                text = if (block.checked) "☑" else "☐",
-                fontSize = fontSize,
-                color = if (block.checked) MaterialTheme.colorScheme.primary
-                else MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.width(24.dp)
+            // 手绘复选框。不用 ☑ / ☐ 字符是因为各设备字体差异太大：
+            // 同一个码位在有些机器上是细线方框、有些机器上直接渲染成彩色 emoji，
+            // 跟正文完全不在一个视觉层级上。Canvas 画出来的尺寸、圆角、
+            // 线条粗细都可控，和 Material 的观感一致。
+            TaskCheckbox(
+                checked = block.checked,
+                modifier = Modifier
+                    .padding(top = (fontSize.value * 0.22f).dp)
+                    .size(16.dp)
             )
+            Spacer(Modifier.width(8.dp))
             Text(
                 text = inline(block.text, refs),
                 fontSize = fontSize,
@@ -201,6 +219,59 @@ private fun BlockView(
                 .height(1.dp)
                 .background(MaterialTheme.colorScheme.outlineVariant)
         )
+    }
+}
+
+/** 任务列表的复选框。
+ *
+ * 手绘而不是用 ☑ / ☐ 字符：同一段 Unicode 在不同设备上差异很大 ——
+ * 有的机器是细线条方框，有的直接渲染成彩色 emoji（截图里那种立体灰块），
+ * 跟正文完全不在一个视觉层级。这里画方框 + 对勾，尺寸、圆角、
+ * 描边粗细都是确定的。
+ *
+ * 勾选态用主题色填充方块 + 白色对勾；未勾选用描边空心方块。
+ */
+@Composable
+private fun TaskCheckbox(checked: Boolean, modifier: Modifier = Modifier) {
+    val accent = MaterialTheme.colorScheme.primary
+    val outline = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f)
+    val onAccent = MaterialTheme.colorScheme.onPrimary
+
+    Canvas(modifier) {
+        val stroke = size.minDimension * 0.11f
+        val radius = size.minDimension * 0.22f
+
+        if (checked) {
+            // 实心方块
+            drawRoundRect(
+                color = accent,
+                size = Size(size.width, size.height),
+                cornerRadius = androidx.compose.ui.geometry.CornerRadius(radius, radius)
+            )
+            // 白色对勾
+            val w = size.width
+            val h = size.height
+            val path = Path().apply {
+                moveTo(w * 0.24f, h * 0.52f)
+                lineTo(w * 0.43f, h * 0.71f)
+                lineTo(w * 0.77f, h * 0.31f)
+            }
+            drawPath(
+                path = path,
+                color = onAccent,
+                style = Stroke(width = stroke, cap = androidx.compose.ui.graphics.StrokeCap.Round)
+            )
+        } else {
+            // 空心方块：描边往里收半个线宽，否则会被裁掉一半
+            val inset = stroke / 2f
+            drawRoundRect(
+                color = outline,
+                topLeft = Offset(inset, inset),
+                size = Size(size.width - stroke, size.height - stroke),
+                cornerRadius = androidx.compose.ui.geometry.CornerRadius(radius, radius),
+                style = Stroke(width = stroke)
+            )
+        }
     }
 }
 
@@ -345,9 +416,11 @@ private fun inline(text: String, refs: Map<String, String> = emptyMap()): Annota
                         )
                     ) { append(span.text) }
 
-                    // 图片单独由 MarkdownImage 渲染，这里只保留 alt 文字占位，
-                    // 避免同一个位置既画图又画字
-                    is Span.Image -> append(span.alt)
+                    // 图片不在这里画：实际图片由 MarkdownImage 组件渲染。
+                    // 这里也不追加 alt 文字 —— 否则图片渲染成功后会变成
+                    // 「alt 文字 + 图片」上下重复；加载失败时 MarkdownImage
+                    // 自己会把 alt 显示在占位框里，信息不会丢。
+                    is Span.Image -> Unit
                 }
             }
         }
