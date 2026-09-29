@@ -27,7 +27,9 @@ import com.phoclaw.chat.data.SkillStore
 import com.phoclaw.chat.data.StreamEvent
 import com.phoclaw.chat.data.StoredConversation
 import com.phoclaw.chat.data.StoredMessage
+import com.phoclaw.chat.data.HttpToolClient
 import com.phoclaw.chat.data.TavilyClient
+import com.phoclaw.chat.data.WebFetchClient
 import com.phoclaw.chat.data.WorkspaceRepository
 import com.phoclaw.chat.util.CommandParser
 import kotlinx.coroutines.CompletableDeferred
@@ -104,6 +106,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** 指令执行器，与后台定时任务共用同一份实现。 */
     private val tavily = TavilyClient()
 
+    /** 网页抓取与通用 HTTP 请求。前者复用 Tavily 的 Key，后者不需要凭据。 */
+    private val webFetch = WebFetchClient()
+    private val httpTool = HttpToolClient()
+
     /**
      * 联网搜索客户端与 Key。
      *
@@ -111,7 +117,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * 用户可能在设置里改了 Key，缓存住的话要重启应用才生效。
      */
     private val dispatcher: CommandDispatcher
-        get() = CommandDispatcher(workspace, tavily, credentials.tavilyKey)
+        get() = CommandDispatcher(
+            workspace = workspace,
+            tavily = tavily,
+            tavilyKey = credentials.tavilyKey,
+            webFetch = webFetch,
+            httpClient = httpTool
+        )
 
     private val _state = MutableStateFlow(ChatUiState())
     val state: StateFlow<ChatUiState> = _state.asStateFlow()
@@ -287,7 +299,28 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         llm.ping(credentials.baseUrl, credentials.apiKey, credentials.model)
 
     /** 设置页的「测试搜索」。 */
-    suspend fun testSearch(): Result<String> = tavily.ping(credentials.tavilyKey)
+    /**
+     * 设置页的「测试联网」。
+     *
+     * 同时验证搜索与抓取 —— 两者共用同一个 Key，但走的是不同接口，
+     * 只测一个可能会出现「搜索能通、抓取被套餐限制挡住」的假阳性。
+     * 用 `also` 让两件事并行不了也至少都执行到，耗时叠加在可接受范围内。
+     */
+    suspend fun testSearch(): Result<String> {
+        val key = credentials.tavilyKey
+        val searchResult = tavily.ping(key)
+        if (searchResult.isFailure) {
+            return Result.failure(searchResult.exceptionOrNull()!!)
+        }
+
+        val fetchResult = webFetch.ping(key)
+        val searchText = searchResult.getOrNull().orEmpty()
+        val fetchText = fetchResult.fold(
+            onSuccess = { it },
+            onFailure = { "抓取接口异常：${it.message ?: it.javaClass.simpleName}" }
+        )
+        return Result.success("搜索 $searchText；抓取 $fetchText")
+    }
 
     // ---------------------------------------------------------------- 聊天
 

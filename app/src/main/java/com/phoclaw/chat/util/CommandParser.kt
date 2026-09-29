@@ -35,7 +35,24 @@ object CommandParser {
              * 也会让「技能白名单里放开 search」这个意图变得含糊
              *（用户想放开的是本地文件搜索，不是让 AI 上网）。
              */
-            WEBSEARCH
+            WEBSEARCH,
+
+            /**
+             * 抓取指定网址的网页正文。
+             *
+             * 与 [WEBSEARCH] 的分工：SEARCH 是「我不知道在哪，帮我找」，
+             * FETCH 是「我知道网址，把内容读给我」。用户贴一个链接过来说
+             * 「看看这个」时，用 FETCH 而不是把链接丢给搜索。
+             */
+            WEBFETCH,
+
+            /**
+             * 发任意 HTTP 请求。
+             *
+             * 这是权限最高的指令：能把数据发到任意服务器。写操作
+             *（POST/PUT/PATCH/DELETE）执行前需要用户确认。
+             */
+            HTTP
         }
     }
 
@@ -51,7 +68,10 @@ object CommandParser {
                 "search|grep|find|info|stat|tree|" +
                 // 联网搜索。web_search / webs / netsearch 都收，
                 // 因为模型未必每次都写对那个词
-                "websearch|web_search|wsearch|webs|netsearch"
+                "websearch|web_search|wsearch|webs|netsearch|" +
+                // 网页抓取与 HTTP 请求
+                "webfetch|web_fetch|fetch|urlfetch|geturl|" +
+                "http|httprequest|http_request|curl|request"
 
     private val BLOCK_REGEX = Regex(
         """```$PREFIX:($ACTIONS)\s*([^\n`]*)\n?([\s\S]*?)```""",
@@ -70,6 +90,8 @@ object CommandParser {
         "move", "mv" -> Command.Action.MOVE
         "search", "grep", "find" -> Command.Action.SEARCH
         "websearch", "web_search", "wsearch", "webs", "netsearch" -> Command.Action.WEBSEARCH
+        "webfetch", "web_fetch", "fetch", "urlfetch", "geturl" -> Command.Action.WEBFETCH
+        "http", "httprequest", "http_request", "curl", "request" -> Command.Action.HTTP
         "info", "stat" -> Command.Action.INFO
         "tree" -> Command.Action.TREE
         else -> null
@@ -92,6 +114,8 @@ object CommandParser {
         Command.Action.MOVE -> "move"
         Command.Action.SEARCH -> "search"
         Command.Action.WEBSEARCH -> "websearch"
+        Command.Action.WEBFETCH -> "webfetch"
+        Command.Action.HTTP -> "http"
         Command.Action.INFO -> "info"
         Command.Action.TREE -> "tree"
     }
@@ -134,6 +158,8 @@ object CommandParser {
                 Command.Action.MOVE -> "移动"
                 Command.Action.SEARCH -> "搜索"
                 Command.Action.WEBSEARCH -> "联网搜索"
+                Command.Action.WEBFETCH -> "抓取网页"
+                Command.Action.HTTP -> "HTTP 请求"
                 Command.Action.INFO -> "详情"
                 Command.Action.TREE -> "目录树"
                 null -> match.groupValues[1]

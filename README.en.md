@@ -2,7 +2,7 @@
 
 An Android app that runs on your phone, holds a conversation, and reads/writes files in your workspace directly.
 
-**Current version: v1.6.8** (versionCode 15)
+**Current version: v1.7.0** (versionCode 16)
 
 [中文文档](README.md) · **English**
 
@@ -18,6 +18,7 @@ An Android app that runs on your phone, holds a conversation, and reads/writes f
 
 | Version | versionCode | Changes |
 |---|---|---|
+| **1.7.0** | 16 | **Web fetch + HTTP request + jump-to-bottom button.** (1) New `webfetch` command — fetches the body of a given URL (reuses Tavily `/extract`, which returns Markdown that the app renders directly), accepts multiple URLs at once, truncates bodies past 12,000 chars with an explicit note. (2) New `http` command — sends **any** HTTP request (GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS) with custom headers and body, and shows status code plus response headers; meant for calling APIs rather than reading pages. The division of labour between the three network tools is spelled out in the system prompt (search to find, fetch to read, http to call). (3) **Mutating `http` requests (POST/PUT/PATCH/DELETE) require user confirmation**, and the dialog states exactly where the request will be sent. (4) A **persistent "jump to latest" button** in the bottom-right of the chat page, with reserved padding so it never covers messages. Also fixed three bugs found by testing: Okio's `readByteArray(n)` throws EOF when the stream is short (which broke every response under 256 KB), the truncation probe over-read by one byte on chunked transfers, and Tavily error bodies nest `detail` as an object so the error reason was being dropped. |
 | **1.6.8** | 15 | **Task list and image rendering fixes.** (1) **Task list checkboxes are now hand-drawn.** Previously rendered with the `☑` / `☐` characters — on most Android devices `☑` falls through to an emoji font and comes out as a bulky 3-D grey block while `☐` uses the text font as a thin outline, so a single list mixed two visual styles that never aligned to the text baseline. Now drawn on a Canvas as a rounded square plus a white tick, fixed at 16dp with proportional corner radius and stroke, so it looks identical everywhere. (2) **Fixed images not showing inside list items.** Only a paragraph that *was* an image and paragraphs with inline images actually rendered them; `- Image: ![x](url)` — an image inside a **list item** — went through inline rendering alone and degraded to a line of alt text, which looks like a broken image. List items and headings now render images too, and inline no longer appends alt text, so a successful load no longer produces a duplicated "alt text + image" pair. |
 | **1.6.7** | 14 | **Links and images, finished.** Two remaining gaps closed: (1) **Reference-style links** `[text][id]` with `[id]: url` definitions at the end of the document (plus the `[text][]` and bare `[id]` shorthand forms), and **bare-URL autolinking** — `https://example.com` becomes tappable on its own, with trailing CJK and ASCII punctuation stripped so the period never ends up inside the URL. (2) **Diagnosable image failures** — instead of a generic "tap to open in browser" the placeholder now reports the actual cause (`server returned 404`, `connection timed out`, `DNS lookup failed`, `HTTPS handshake failed`, `image exceeds 12 MB`, `unrecognised image format`), and the loader follows redirects and sends `Accept: image/*`, so image hosts that 302 now resolve properly. |
 | **1.6.6** | 13 | **Complete Markdown rendering.** Added bold-italic `***x***`, strikethrough `~~x~~`, underline `<u>x</u>`, task lists `- [ ]` / `- [x]` (checked items are struck through and dimmed), and images `![alt](url)` (fetched and decoded via OkHttp with an in-memory cache — no new dependency). Backslash escapes (`\*`) now work. **Links are clickable** — previously they were only coloured and did nothing; they now register a real hit area via `LinkAnnotation.Url` and open the system browser. Failed image loads show a placeholder that can be tapped to open in a browser. |
@@ -80,6 +81,8 @@ infinite loops).
 | `append <file>` | Append to the end of a file |
 | `search <keyword> [dir]` | Search **workspace file contents**, returns `file:line: content` |
 | `websearch <keyword>` | **Search the internet**, returns a summary and snippets with source links |
+| `webfetch <url...>` | **Fetch the body of given pages** (whitespace-separated URLs), returns cleaned Markdown |
+| `http <method> <url>` | **Send an HTTP request**, optionally with headers and a body below |
 | `info <path>` | Show size, type, modification time |
 | `mkdir <dir>` | Create a directory |
 | `copy <src> -> <dst>` | Copy a file or directory (recursive for directories) |
@@ -88,7 +91,9 @@ infinite loops).
 
 **Aliases**: `ls`=`list`, `cp`=`copy`, `mv`=`move`, `rm`/`del`=`delete`, `md`=`mkdir`,
 `grep`/`find`=`search`, `stat`=`info`.
-`websearch` also accepts `web_search` / `wsearch` / `webs` / `netsearch`.
+`websearch` also accepts `web_search` / `wsearch` / `webs` / `netsearch`;
+`webfetch` also accepts `web_fetch` / `fetch` / `urlfetch` / `geturl`;
+`http` also accepts `httprequest` / `http_request` / `curl` / `request`.
 `copy` / `move` arguments may also be space-separated: `cp a.js b.js`.
 
 > ⚠️ `search` and `websearch` are **not the same thing**: the former searches file contents
@@ -127,6 +132,8 @@ try another approach — rather than waiting forever on a dialog no one will eve
 | **Skill import** | Import local `.md` / `.json`; a skill = prompt + command allowlist; once active it's injected into the system message and out-of-scope commands are intercepted |
 | **Scheduled tasks** | Title / summary / natural-language prompt / cron expression; runs unattended in the background and notifies on completion |
 | **Web search** | With a Tavily key, the AI can call `websearch` on its own to verify current facts and cite sources; works in both chat and scheduled tasks |
+| **Web fetch** | `webfetch` pulls the body of given URLs (cleaned to Markdown), multiple URLs per call; shares the Tavily key |
+| **HTTP request** | `http` sends arbitrary requests with custom headers/body and shows status + response headers; no key needed, mutating calls need confirmation |
 | Workspace read/write | SAF (`OpenDocumentTree`), **no storage permission**, supports subdirectories and auto-creates parents |
 | Workspace switching | Change the directory anytime from Settings or the Files screen; resets to the new workspace root |
 | File operations | 12 commands: read / write / append / list / tree / search / websearch / info / mkdir / copy / move / delete |

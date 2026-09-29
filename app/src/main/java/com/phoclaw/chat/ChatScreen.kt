@@ -36,6 +36,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.phoclaw.chat.data.PendingAttachment
 import com.phoclaw.chat.ui.MarkdownText
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -177,22 +178,62 @@ fun ChatScreen(
                 WorkspacePrompt(onPick = { picker.launch(null) })
             }
 
-            LazyColumn(
-                state = listState,
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth(),
-                contentPadding = PaddingValues(12.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                if (state.messages.isEmpty()) {
-                    item { EmptyHint(hasWorkspace = state.workspaceReady) }
+            Box(Modifier.weight(1f)) {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier
+                        .fillMaxSize(),
+                    contentPadding = PaddingValues(
+                        start = 12.dp,
+                        end = 12.dp,
+                        top = 12.dp,
+                        // 底部多留一块：悬浮按钮压在右下角，
+                        // 不留空间的话最后一条消息的右下角会被盖住
+                        bottom = 12.dp + 48.dp
+                    ),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    if (state.messages.isEmpty()) {
+                        item { EmptyHint(hasWorkspace = state.workspaceReady) }
+                    }
+                    // 内部消息（工具结果回灌、附件内容注入）不渲染气泡，
+                    // 但其挂载的工具日志要展示
+                    items(state.messages) { msg ->
+                        if (msg.isInternal && msg.toolLog.isEmpty()) return@items
+                        MessageBubble(msg, attachmentFile = vm::attachmentFile)
+                    }
                 }
-                // 内部消息（工具结果回灌、附件内容注入）不渲染气泡，
-                // 但其挂载的工具日志要展示
-                items(state.messages) { msg ->
-                    if (msg.isInternal && msg.toolLog.isEmpty()) return@items
-                    MessageBubble(msg, attachmentFile = vm::attachmentFile)
+
+                /*
+                 * 「回到最新」悬浮按钮。
+                 *
+                 * 常驻显示（用户明确要求）——好处是不会在滚动时突然出现/消失
+                 * 导致视觉抖动，位置固定也就形成了肌肉记忆。
+                 *
+                 * 没有消息时隐藏：空对话页上飘一个「回到最新」很怪，
+                 * 而且那时也没什么可滚的。
+                 */
+                if (state.messages.isNotEmpty()) {
+                    val scope = rememberCoroutineScope()
+                    SmallFloatingActionButton(
+                        onClick = {
+                            scope.launch {
+                                // 用 animate 而不是 snap：消息多时瞬间跳转会让人
+                                // 失去方位感，平滑滚动能看清中间掠过了什么
+                                listState.animateScrollToItem(state.messages.lastIndex)
+                            }
+                        },
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(end = 14.dp, bottom = 14.dp),
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onSecondaryContainer
+                    ) {
+                        Icon(
+                            Icons.Default.ArrowDownward,
+                            contentDescription = "回到最新消息"
+                        )
+                    }
                 }
             }
 

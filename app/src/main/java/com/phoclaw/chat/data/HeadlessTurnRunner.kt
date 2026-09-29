@@ -99,12 +99,14 @@ class HeadlessTurnRunner(
         val systemPrompt = PromptComposer.compose(credentials.systemPrompt, activeSkills)
         val whitelist = PromptComposer.effectiveWhitelist(activeSkills)
 
-        // 联网搜索在后台任务里同样可用：用户选的「两者都能用」。
+        // 联网搜索、网页抓取、HTTP 请求在后台任务里同样可用：用户选的「两者都能用」。
         // 这里的 dispatcher 每次 run 都新建，保证拿到的是当前最新的 Tavily Key
         val dispatcher = CommandDispatcher(
             workspace = workspace,
             tavily = TavilyClient(),
-            tavilyKey = credentials.tavilyKey
+            tavilyKey = credentials.tavilyKey,
+            webFetch = WebFetchClient(),
+            httpClient = HttpToolClient()
         )
         var lastAssistantText = ""
         var round = 0

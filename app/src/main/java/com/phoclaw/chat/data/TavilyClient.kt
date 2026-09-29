@@ -183,11 +183,23 @@ class TavilyClient {
         }
     }
 
-    /** 从错误响应里挖出可读信息。Tavily 用 detail / error 字段。 */
+    /**
+     * 从错误响应里挖出可读信息。Tavily 用 detail / error 字段。
+     *
+     * 注意 `detail` 有两种形状（实测）：字符串，或 `{"error": "..."}` 这样的
+     * **对象**。后者用 optString 取会得到空串，错误原因就丢了 ——
+     * 所以两种情况都要处理。
+     */
     private fun extractMessage(body: String): String {
         if (body.isBlank()) return ""
         return runCatching {
             val json = JSONObject(body)
+
+            json.optJSONObject("detail")?.let { d ->
+                d.optString("error").ifBlank { d.optString("message") }
+                    .ifBlank { d.optString("detail") }
+            }?.takeIf { it.isNotBlank() }?.let { return@runCatching it }
+
             json.optString("detail").ifBlank { json.optString("error") }
                 .ifBlank { json.optString("message") }
         }.getOrElse { body.take(160) }

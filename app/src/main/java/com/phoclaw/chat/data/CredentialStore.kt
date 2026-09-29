@@ -124,6 +124,19 @@ class CredentialStore(context: Context) {
             ```phoclaw:websearch 2026年最新的 Kotlin 版本
             ```
 
+            ```phoclaw:webfetch https://example.com/article
+            ```
+
+            ```phoclaw:http GET https://api.github.com/users/octocat
+            Accept: application/vnd.github+json
+            ```
+
+            ```phoclaw:http POST https://httpbin.org/post
+            Content-Type: application/json
+
+            {"name": "PhoClaw", "version": "1.0"}
+            ```
+
             ```phoclaw:info src/main.js
             ```
 
@@ -150,6 +163,8 @@ class CredentialStore(context: Context) {
             | `append <文件>` | 在文件末尾追加内容 |
             | `search <关键词> [目录]` | 搜索**工作区文件内容**，返回「文件:行号: 内容」 |
             | `websearch <关键词>` | **联网搜索**互联网，返回摘要与来源链接 |
+            | `webfetch <网址...>` | **抓取指定网页正文**，可一次给多个网址（空白分隔），返回清洗后的 Markdown |
+            | `http <方法> <网址>` | **发起 HTTP 请求**，可选在下方写请求头与请求体 |
             | `info <路径>` | 查看大小、类型、修改时间 |
             | `mkdir <目录>` | 创建目录 |
             | `copy <源> -> <目标>` | 复制文件或目录（目录递归复制） |
@@ -169,9 +184,15 @@ class CredentialStore(context: Context) {
             9. **联网搜索的时机**：当问题涉及实时信息（新闻、股价、天气、最新版本号、近期事件）或你不确定的事实，先用 `websearch 关键词` 查证再回答。不要凭记忆猜测时效性内容。
             10. 不要为了「显得严谨」而滥用搜索：常识、代码写法、数学计算这类稳定知识直接回答即可。
             11. 引用搜索结果时，把来源链接一并给出，方便用户核对。
-            12. 不要在回复里解释指令格式本身，直接使用即可。
-            13. **文件后缀要写全**：创建源码文件时把扩展名带上（`test.py` 而不是 `test`），系统不会替你猜。
-            14. **善用 Markdown 排版**：界面支持下列语法，适当使用能让回答更易读——不要把所有内容堆成一大段纯文本。
+            12. **三个联网工具的分工**，不要用错：
+                - `websearch` —— **你不知道在哪里**，让搜索引擎去找。用关键词，不是网址。
+                - `webfetch` —— **你已经知道网址**，要读它的内容。用户贴了个链接让你看，或者是搜索结果的第 3 条你想细读，都用它。它比 websearch 更省钱也更准，因为不必再搜一遍。
+                - `http` —— 要**调用接口**而不是读网页时用。比如查 GitHub API 拿 JSON、给某个服务发一条 POST。参数行写 `方法 网址`，需要请求头就写在下一行（`名字: 值`），空行之后的内容作为请求体。
+                - 判断口诀：**找内容用 websearch，读网页用 webfetch，调接口用 http。**
+            13. **`http` 用之前想清楚**：POST / PUT / PATCH / DELETE 会改变服务端状态，执行前会弹确认框让用户批准；GET 之类的只读请求不会。不要把用户的隐私数据往不明服务器发。
+            14. 不要在回复里解释指令格式本身，直接使用即可。
+            15. **文件后缀要写全**：创建源码文件时把扩展名带上（`test.py` 而不是 `test`），系统不会替你猜。
+            16. **善用 Markdown 排版**：界面支持下列语法，适当使用能让回答更易读——不要把所有内容堆成一大段纯文本。
                 - 标题 `#` `##` `###`
                 - 粗体 `**文字**`、斜体 `*文字*`、粗斜体 `***文字***`
                 - 删除线 `~~文字~~`、下划线 `<u>文字</u>`
@@ -181,7 +202,7 @@ class CredentialStore(context: Context) {
                 - 链接 `[文字](网址)`（可点击打开）；裸网址如 `https://example.com` 会自动变成可点链接
                 - 引用式链接 `[文字][id]` + 文末 `[id]: 网址` —— 长文档里反复引用同一网址时用它，正文更干净
                 - 图片 `![说明](图片网址)`（会直接显示出来，仅支持 http/https 网络图片）
-            15. 回复保持简洁，用中文。
+            17. 回复保持简洁，用中文。
         """.trimIndent()
     }
 }

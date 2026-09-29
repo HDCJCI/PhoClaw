@@ -252,13 +252,16 @@ fun SettingsScreen(
 
             HorizontalDivider()
 
-            // ---------------- 联网搜索 ----------------
+            // ---------------- 联网搜索与网页抓取 ----------------
 
-            Text("联网搜索", style = MaterialTheme.typography.titleMedium)
+            Text("联网搜索与网页抓取", style = MaterialTheme.typography.titleMedium)
 
             Text(
-                "填入 Tavily API Key 后，AI 就能在需要时调用 `websearch` 指令\n" +
-                        "查询实时信息（新闻、股价、最新版本号等），并在回答里附上来源链接。",
+                "填入 Tavily API Key 后，AI 就能在需要时联网：\n" +
+                        "· `websearch` —— 搜索实时信息（新闻、股价、最新版本号等）\n" +
+                        "· `webfetch` —— 抓取指定网址的正文（用户贴链接让它看时用这个）\n" +
+                        "两者都会在回答里附上来源链接。另外 `http` 指令（发任意 HTTP 请求）" +
+                        "不需要 Key，始终可用。",
                 fontSize = 11.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -309,7 +312,7 @@ fun SettingsScreen(
                         }
                     },
                     modifier = Modifier.weight(1f)
-                ) { Text("保存搜索设置") }
+                ) { Text("保存设置") }
 
                 OutlinedButton(
                     onClick = {
@@ -320,7 +323,7 @@ fun SettingsScreen(
                             val result = vm.testSearch()
                             testingSearch = false
                             snackbarHost.showSnackbar(
-                                result.fold({ "搜索可用：$it" }, { "失败：${it.message}" })
+                                result.fold({ "可用：$it" }, { "失败：${it.message}" })
                             )
                         }
                     },
