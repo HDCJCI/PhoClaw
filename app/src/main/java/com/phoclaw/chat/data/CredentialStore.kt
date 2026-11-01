@@ -52,11 +52,32 @@ class CredentialStore(context: Context) {
      *
      * 用户手动编辑过之后（[hasCustomSystemPrompt] 为 true），就以用户的版本为准，
      * 不再自动生成 —— 那是用户明确表达的意图，不该被覆盖。
+     *
+     * 生成结果会缓存：这个方法在每一轮工具循环里都会被调用，
+     * 而 `SystemPromptBuilder.build()` 要拼十几段围栏 + 一张表 + 近三十条规则。
+     * 缓存键是 [codeExecEnabled] —— 它是唯一会改变生成内容的运行时开关。
      */
     var systemPrompt: String
-        get() = prefs.getString(KEY_SYSTEM_PROMPT, null)
-            ?: SystemPromptBuilder.build(codeExecEnabled)
+        get() {
+            prefs.getString(KEY_SYSTEM_PROMPT, null)?.let { return it }
+
+            val flag = codeExecEnabled
+            val cached = defaultPromptCache
+            if (cached != null && defaultPromptFlag == flag) return cached
+
+            return SystemPromptBuilder.build(flag).also {
+                defaultPromptCache = it
+                defaultPromptFlag = flag
+            }
+        }
         set(value) = prefs.edit().putString(KEY_SYSTEM_PROMPT, value).apply()
+
+    /** 默认提示词的缓存。见 [systemPrompt] 的说明。 */
+    @Volatile
+    private var defaultPromptCache: String? = null
+
+    @Volatile
+    private var defaultPromptFlag: Boolean? = null
 
     /** 用户是否手动改过提示词。设置页据此显示「恢复默认」。 */
     val hasCustomSystemPrompt: Boolean
