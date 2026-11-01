@@ -49,6 +49,12 @@ fun SettingsScreen(
     var showTavily by remember { mutableStateOf(false) }
     var testingSearch by remember { mutableStateOf(false) }
 
+    // 代码执行（默认关闭）
+    var codeExecEnabled by remember { mutableStateOf(store.codeExecEnabled) }
+
+    // 提示词是否已被用户固定。未固定时它随工具表自动生成
+    var promptCustomized by remember { mutableStateOf(store.hasCustomSystemPrompt) }
+
     // 工作区：选目录后要立刻刷新界面上的名字，所以用状态而不是直接读 vm
     val state by vm.state.collectAsState()
     var workspaceName by remember(state.workspaceName) {
@@ -352,6 +358,61 @@ fun SettingsScreen(
 
             HorizontalDivider()
 
+            // ---------------- 代码执行 ----------------
+            Text("代码执行", style = MaterialTheme.typography.titleMedium)
+
+            Text(
+                "开启后 AI 可以用 `run` 指令运行代码，支持 Python、JavaScript、C++、C、Java、Go、Rust、Shell 等 30+ 种语言。",
+                fontSize = 12.sp,
+                lineHeight = 18.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            Text(
+                "⚠️ 代码会发送到 wandbox.org 执行 —— 这是第三方服务，代码会离开你的设备。" +
+                        "不要运行含密钥、密码或个人数据的代码。",
+                fontSize = 12.sp,
+                lineHeight = 18.sp,
+                color = MaterialTheme.colorScheme.error
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("允许远程执行", fontSize = 14.sp)
+                    Text(
+                        if (codeExecEnabled) "已开启 · 代码会上传到 wandbox.org"
+                        else "已关闭 · 代码不会离开设备",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = codeExecEnabled,
+                    onCheckedChange = { checked ->
+                        codeExecEnabled = checked
+                        store.codeExecEnabled = checked
+                        // 未自定义提示词时，让它重新生成 —— `run` 的可用状态
+                        // 会写进提示词，开关变了模型也该知道
+                        if (!store.hasCustomSystemPrompt) {
+                            systemPrompt = store.systemPrompt
+                        }
+                    }
+                )
+            }
+
+            Text(
+                "远程环境是隔离的，看不到工作区的其它文件；二进制文件无法运行" +
+                        "（Android 10+ 禁止执行可写目录里的 ELF 文件）。",
+                fontSize = 11.sp,
+                lineHeight = 16.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            HorizontalDivider()
+
             Text("系统提示词", style = MaterialTheme.typography.titleMedium)
             OutlinedTextField(
                 value = systemPrompt,
@@ -360,12 +421,22 @@ fun SettingsScreen(
                     .fillMaxWidth()
                     .heightIn(min = 200.dp),
                 textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-                supportingText = { Text("模型据此理解 phoclaw 指令格式，非必要不要改动", fontSize = 11.sp) }
+                supportingText = {
+                    Text(
+                        if (promptCustomized) {
+                            "已自定义 · 工具说明不再自动更新，点下方「恢复默认」可重新跟随工具表生成"
+                        } else {
+                            "自动生成 · 工具增删后会自动更新，无需手动改"
+                        },
+                        fontSize = 11.sp
+                    )
+                }
             )
 
             OutlinedButton(
                 onClick = {
                     store.systemPrompt = systemPrompt
+                    promptCustomized = true
                     scope.launch { snackbarHost.showSnackbar("提示词已保存") }
                 },
                 modifier = Modifier.fillMaxWidth()
@@ -373,7 +444,10 @@ fun SettingsScreen(
 
             TextButton(
                 onClick = {
-                    systemPrompt = com.phoclaw.chat.data.CredentialStore.DEFAULT_SYSTEM_PROMPT
+                    store.resetSystemPrompt()
+                    promptCustomized = false
+                    systemPrompt = store.systemPrompt
+                    scope.launch { snackbarHost.showSnackbar("已恢复自动生成") }
                 },
                 modifier = Modifier.fillMaxWidth()
             ) { Text("恢复默认提示词") }

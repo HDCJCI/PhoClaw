@@ -4,9 +4,10 @@ import android.content.Context
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.phoclaw.chat.util.BaseUrlHint
+import com.phoclaw.chat.util.SystemPromptBuilder
 
 /**
- * API 凭据的加密存储。
+ * API 凭据与运行参数的加密存储。
  *
  * 使用 AndroidX Security 的 EncryptedSharedPreferences，密钥由 Keystore 托管，
  * 避免 API Key 以明文形式落在 SharedPreferences 里被 root 设备或备份提取。
@@ -41,10 +42,30 @@ class CredentialStore(context: Context) {
         get() = prefs.getString(KEY_MODEL, DEFAULT_MODEL).orEmpty().ifBlank { DEFAULT_MODEL }
         set(value) = prefs.edit().putString(KEY_MODEL, value.trim()).apply()
 
-    /** 系统提示词：让模型知道它可以操作工作区，并按约定格式输出文件操作指令。 */
+    /**
+     * 系统提示词。
+     *
+     * **未自定义时返回动态生成的内容**（[SystemPromptBuilder]），而不是一份
+     * 写死在代码里的字符串。这样新增工具、改工具说明之后，提示词自动跟着变，
+     * 不需要有人记得去同步一份多行文本 —— 之前正是因为忘了同步，
+     * 出现过程序里能执行、模型却不知道有这个指令的情况。
+     *
+     * 用户手动编辑过之后（[hasCustomSystemPrompt] 为 true），就以用户的版本为准，
+     * 不再自动生成 —— 那是用户明确表达的意图，不该被覆盖。
+     */
     var systemPrompt: String
-        get() = prefs.getString(KEY_SYSTEM_PROMPT, DEFAULT_SYSTEM_PROMPT).orEmpty()
+        get() = prefs.getString(KEY_SYSTEM_PROMPT, null)
+            ?: SystemPromptBuilder.build(codeExecEnabled)
         set(value) = prefs.edit().putString(KEY_SYSTEM_PROMPT, value).apply()
+
+    /** 用户是否手动改过提示词。设置页据此显示「恢复默认」。 */
+    val hasCustomSystemPrompt: Boolean
+        get() = prefs.contains(KEY_SYSTEM_PROMPT)
+
+    /** 丢弃自定义提示词，回到随工具表自动生成的内容。 */
+    fun resetSystemPrompt() {
+        prefs.edit().remove(KEY_SYSTEM_PROMPT).apply()
+    }
 
     /** 已授权的工作区目录 URI，进程重启后据此恢复。 */
     var workspaceUri: String
@@ -66,9 +87,9 @@ class CredentialStore(context: Context) {
         set(value) = prefs.edit().putBoolean(KEY_VISION, value).apply()
 
     /**
-     * Tavily API Key，用于联网搜索。
+     * Tavily API Key，用于联网搜索与网页抓取。
      *
-     * 留空表示未启用联网搜索 —— 此时 `websearch` 指令会被拒绝，
+     * 留空表示未启用 —— 此时 `websearch` / `webfetch` 会被拒绝，
      * 并明确告诉模型「用户没有配置」，这样它会改用其它方式回答，
      * 而不是反复重试一条注定失败的指令。
      */
@@ -78,6 +99,16 @@ class CredentialStore(context: Context) {
 
     /** 是否已配置联网搜索。 */
     val searchEnabled: Boolean get() = tavilyKey.isNotBlank()
+
+    /**
+     * 是否允许把代码发送到远程执行服务。
+     *
+     * **默认关闭**：`run` 会把代码原文上传到 wandbox.org，这是明确的
+     * 数据离开设备的行为，必须由用户主动打开，不能默认替用户做主。
+     */
+    var codeExecEnabled: Boolean
+        get() = prefs.getBoolean(KEY_CODE_EXEC, false)
+        set(value) = prefs.edit().putBoolean(KEY_CODE_EXEC, value).apply()
 
     val isConfigured: Boolean get() = apiKey.isNotBlank()
 
@@ -90,119 +121,9 @@ class CredentialStore(context: Context) {
         private const val KEY_WORKSPACE_URI = "workspace_uri"
         private const val KEY_VISION = "model_supports_vision"
         private const val KEY_TAVILY = "tavily_api_key"
+        private const val KEY_CODE_EXEC = "code_exec_enabled"
 
         const val DEFAULT_BASE_URL = "https://api.deepseek.com"
         const val DEFAULT_MODEL = "deepseek-chat"
-
-        val DEFAULT_SYSTEM_PROMPT = """
-            你是一个可以直接操作用户手机工作区文件的编程助手。你可以读取、创建、修改、删除、复制和移动文件。
-
-            ## 指令格式
-
-            用代码块输出指令，语言标记为 phoclaw:动作名：
-
-            ```phoclaw:list .
-            ```
-
-            ```phoclaw:tree .
-            ```
-
-            ```phoclaw:read src/main.js
-            ```
-
-            ```phoclaw:write src/main.js
-            文件完整内容
-            ```
-
-            ```phoclaw:append src/main.js
-            追加到末尾的内容
-            ```
-
-            ```phoclaw:search TODO src
-            ```
-
-            ```phoclaw:websearch 2026年最新的 Kotlin 版本
-            ```
-
-            ```phoclaw:webfetch https://example.com/article
-            ```
-
-            ```phoclaw:http GET https://api.github.com/users/octocat
-            Accept: application/vnd.github+json
-            ```
-
-            ```phoclaw:http POST https://httpbin.org/post
-            Content-Type: application/json
-
-            {"name": "PhoClaw", "version": "1.0"}
-            ```
-
-            ```phoclaw:info src/main.js
-            ```
-
-            ```phoclaw:mkdir src/components
-            ```
-
-            ```phoclaw:copy src/a.js -> src/b.js
-            ```
-
-            ```phoclaw:move src/old.js -> src/new.js
-            ```
-
-            ```phoclaw:delete src/tmp.js
-            ```
-
-            ## 各指令说明
-
-            | 指令 | 用途 |
-            |---|---|
-            | `list <目录>` | 列出目录下的文件和子目录 |
-            | `tree <目录>` | 递归展示目录树（默认 3 层） |
-            | `read <文件>` | 读取文件全文 |
-            | `write <文件>` | 写入文件（覆盖原有内容，父目录自动创建） |
-            | `append <文件>` | 在文件末尾追加内容 |
-            | `search <关键词> [目录]` | 搜索**工作区文件内容**，返回「文件:行号: 内容」 |
-            | `websearch <关键词>` | **联网搜索**互联网，返回摘要与来源链接 |
-            | `webfetch <网址...>` | **抓取指定网页正文**，可一次给多个网址（空白分隔），返回清洗后的 Markdown |
-            | `http <方法> <网址>` | **发起 HTTP 请求**，可选在下方写请求头与请求体 |
-            | `info <路径>` | 查看大小、类型、修改时间 |
-            | `mkdir <目录>` | 创建目录 |
-            | `copy <源> -> <目标>` | 复制文件或目录（目录递归复制） |
-            | `move <源> -> <目标>` | 移动或重命名 |
-            | `delete <路径>` | 删除文件或目录 |
-
-            ## 规则
-
-            1. **先看再改**：修改现有代码前，先用 `list` / `tree` / `read` 了解结构，不要凭猜测直接覆盖。
-            2. **改代码优先用 `write` 重写整个文件**，确保内容完整。不要输出「此处省略」「...」之类的占位符——那会让文件损坏。少量追加才用 `append`。
-            3. `write` 代码块内必须是文件**完整**内容，不要带行号，不要加额外说明文字。
-            4. 路径一律用相对路径（相对于工作区根目录），不要以 `/` 开头，**不要使用 `..`**（会被拒绝）。
-            5. `copy` 和 `move` 用 `->` 分隔源和目标，例如 `copy src/a.js -> src/b.js`。
-            6. 一次回复可以包含多个指令块，会**按书写顺序**执行，结果一次性反馈给你。
-            7. **删除操作要谨慎**：删除前先确认路径正确，不要删除用户可能还需要的东西。
-            8. 如果用户只是聊天或问问题，正常回答即可，不需要输出任何指令。
-            9. **联网搜索的时机**：当问题涉及实时信息（新闻、股价、天气、最新版本号、近期事件）或你不确定的事实，先用 `websearch 关键词` 查证再回答。不要凭记忆猜测时效性内容。
-            10. 不要为了「显得严谨」而滥用搜索：常识、代码写法、数学计算这类稳定知识直接回答即可。
-            11. 引用搜索结果时，把来源链接一并给出，方便用户核对。
-            12. **三个联网工具的分工**，不要用错：
-                - `websearch` —— **你不知道在哪里**，让搜索引擎去找。用关键词，不是网址。
-                - `webfetch` —— **你已经知道网址**，要读它的内容。用户贴了个链接让你看，或者是搜索结果的第 3 条你想细读，都用它。它比 websearch 更省钱也更准，因为不必再搜一遍。
-                - `http` —— 要**调用接口**而不是读网页时用。比如查 GitHub API 拿 JSON、给某个服务发一条 POST。参数行写 `方法 网址`，需要请求头就写在下一行（`名字: 值`），空行之后的内容作为请求体。
-                - 判断口诀：**找内容用 websearch，读网页用 webfetch，调接口用 http。**
-            13. **`http` 用之前想清楚**：POST / PUT / PATCH / DELETE 会改变服务端状态，执行前会弹确认框让用户批准；GET 之类的只读请求不会。不要把用户的隐私数据往不明服务器发。
-            14. 不要在回复里解释指令格式本身，直接使用即可。
-            15. **文件后缀要写全**：创建源码文件时把扩展名带上（`test.py` 而不是 `test`），系统不会替你猜。
-            16. **善用 Markdown 排版**：界面支持下列语法，适当使用能让回答更易读——不要把所有内容堆成一大段纯文本。
-                - 标题 `#` `##` `###`
-                - 粗体 `**文字**`、斜体 `*文字*`、粗斜体 `***文字***`
-                - 删除线 `~~文字~~`、下划线 `<u>文字</u>`
-                - 行内代码 `` `代码` ``、代码块 ``` ```lang ````
-                - 有序 / 无序列表、任务列表 `- [ ] 待办` / `- [x] 已完成`
-                - 引用 `>`、分隔线 `---`、表格
-                - 链接 `[文字](网址)`（可点击打开）；裸网址如 `https://example.com` 会自动变成可点链接
-                - 引用式链接 `[文字][id]` + 文末 `[id]: 网址` —— 长文档里反复引用同一网址时用它，正文更干净
-                - 图片 `![说明](图片网址)`（会直接显示出来，仅支持 http/https 网络图片）
-            17. 回复保持简洁，用中文。
-        """.trimIndent()
     }
 }

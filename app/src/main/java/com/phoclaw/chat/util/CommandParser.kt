@@ -52,7 +52,17 @@ object CommandParser {
              * 这是权限最高的指令：能把数据发到任意服务器。写操作
              *（POST/PUT/PATCH/DELETE）执行前需要用户确认。
              */
-            HTTP
+            HTTP,
+
+            /**
+             * 运行工作区里的代码。
+             *
+             * 走远程执行（Wandbox），因为 Android 系统里没有任何语言运行时：
+             * 没有 python / node / clang，系统只带了 `/system/bin/sh`。
+             * 而且 Android 10+ 的 W^X 策略禁止执行可写目录里的 ELF，
+             * 所以连用户自己放进去的二进制也跑不了。
+             */
+            RUN
         }
     }
 
@@ -63,65 +73,42 @@ object CommandParser {
     )
 
     private const val PREFIX = "(?:phoclaw|espclaw)"
-    private const val ACTIONS =
-        "write|read|list|ls|delete|del|rm|mkdir|md|append|copy|cp|move|mv|" +
-                "search|grep|find|info|stat|tree|" +
-                // 联网搜索。web_search / webs / netsearch 都收，
-                // 因为模型未必每次都写对那个词
-                "websearch|web_search|wsearch|webs|netsearch|" +
-                // 网页抓取与 HTTP 请求
-                "webfetch|web_fetch|fetch|urlfetch|geturl|" +
-                "http|httprequest|http_request|curl|request"
 
-    private val BLOCK_REGEX = Regex(
-        """```$PREFIX:($ACTIONS)\s*([^\n`]*)\n?([\s\S]*?)```""",
-        RegexOption.IGNORE_CASE
-    )
+    /**
+     * 动作名分支从 [ToolCatalog] 生成。
+     *
+     * 别名只在那里维护一份，这里不再手写长字符串 —— 以前加一个别名
+     * 要同时改正则和 `actionFromAlias`，漏一处就会出现「正则匹配得上、
+     * 映射查不到」的静默失败。
+     *
+     * 用 `by lazy` 避免 object 初始化顺序问题（ToolCatalog 反过来引用了
+     * [Command.Action]）。
+     */
+    private val actionPattern: String by lazy { ToolCatalog.actionPattern }
+
+    private val BLOCK_REGEX: Regex by lazy {
+        Regex(
+            """```$PREFIX:($actionPattern)\s*([^\n`]*)\n?([\s\S]*?)```""",
+            RegexOption.IGNORE_CASE
+        )
+    }
 
     /** 把各种写法归一到内部动作。技能白名单解析也用它，所以是公开的。 */
-    fun actionFromAlias(raw: String): Command.Action? = when (raw.trim().lowercase()) {
-        "write" -> Command.Action.WRITE
-        "read" -> Command.Action.READ
-        "list", "ls" -> Command.Action.LIST
-        "delete", "del", "rm" -> Command.Action.DELETE
-        "mkdir", "md" -> Command.Action.MKDIR
-        "append" -> Command.Action.APPEND
-        "copy", "cp" -> Command.Action.COPY
-        "move", "mv" -> Command.Action.MOVE
-        "search", "grep", "find" -> Command.Action.SEARCH
-        "websearch", "web_search", "wsearch", "webs", "netsearch" -> Command.Action.WEBSEARCH
-        "webfetch", "web_fetch", "fetch", "urlfetch", "geturl" -> Command.Action.WEBFETCH
-        "http", "httprequest", "http_request", "curl", "request" -> Command.Action.HTTP
-        "info", "stat" -> Command.Action.INFO
-        "tree" -> Command.Action.TREE
-        else -> null
-    }
+    fun actionFromAlias(raw: String): Command.Action? =
+        ToolCatalog.aliasToAction[raw.trim().lowercase()]
 
     /**
      * 动作的规范名，用于技能白名单比对。
      *
-     * 必须与 [actionFromAlias] 的主名一致 —— 白名单里存的是规范名，
+     * 直接取 [ToolCatalog] 里的名字 —— 白名单里存的是规范名，
      * 用户用 `rm` 还是 `delete` 写指令都归一到同一个值。
      */
-    fun actionName(action: Command.Action): String = when (action) {
-        Command.Action.WRITE -> "write"
-        Command.Action.READ -> "read"
-        Command.Action.LIST -> "list"
-        Command.Action.DELETE -> "delete"
-        Command.Action.MKDIR -> "mkdir"
-        Command.Action.APPEND -> "append"
-        Command.Action.COPY -> "copy"
-        Command.Action.MOVE -> "move"
-        Command.Action.SEARCH -> "search"
-        Command.Action.WEBSEARCH -> "websearch"
-        Command.Action.WEBFETCH -> "webfetch"
-        Command.Action.HTTP -> "http"
-        Command.Action.INFO -> "info"
-        Command.Action.TREE -> "tree"
-    }
+    fun actionName(action: Command.Action): String = ToolCatalog.toolOf(action).name
 
     /** 全部合法动作名，用于给用户提示。 */
-    val ALL_ACTION_NAMES: List<String> = Command.Action.entries.map { actionName(it) }
+    val ALL_ACTION_NAMES: List<String> by lazy {
+        Command.Action.entries.map { actionName(it) }
+    }
 
     fun parse(raw: String): ParseResult {
         val commands = mutableListOf<Command>()
@@ -147,23 +134,7 @@ object CommandParser {
         val display = BLOCK_REGEX.replace(raw) { match ->
             val action = actionFromAlias(match.groupValues[1])
             val arg = match.groupValues[2].trim()
-            val label = when (action) {
-                Command.Action.WRITE -> "写入"
-                Command.Action.READ -> "读取"
-                Command.Action.LIST -> "列出"
-                Command.Action.DELETE -> "删除"
-                Command.Action.MKDIR -> "新建目录"
-                Command.Action.APPEND -> "追加"
-                Command.Action.COPY -> "复制"
-                Command.Action.MOVE -> "移动"
-                Command.Action.SEARCH -> "搜索"
-                Command.Action.WEBSEARCH -> "联网搜索"
-                Command.Action.WEBFETCH -> "抓取网页"
-                Command.Action.HTTP -> "HTTP 请求"
-                Command.Action.INFO -> "详情"
-                Command.Action.TREE -> "目录树"
-                null -> match.groupValues[1]
-            }
+            val label = action?.let { ToolCatalog.toolOf(it).label } ?: match.groupValues[1]
             "\n\ud83d\udee0\ufe0f [$label] $arg\n"
         }.trim()
 

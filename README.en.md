@@ -2,7 +2,7 @@
 
 An Android app that runs on your phone, holds a conversation, and reads/writes files in your workspace directly.(Just software made out of boredom)
 
-**Current version: v1.7.0** (versionCode 16)
+**Current version: v1.8.0** (versionCode 17)
 
 [中文文档](README.md) · **English**
 
@@ -18,6 +18,7 @@ An Android app that runs on your phone, holds a conversation, and reads/writes f
 
 | Version | versionCode | Changes |
 |---|---|---|
+| **1.8.0** | 17 | **Code execution + auto-generated system prompt.** (1) New `run` command — executes code in 30+ languages (Python / JavaScript / C++ / C / Java / Go / Rust / Shell / PHP / Ruby / Lua…). Android ships no language runtime, and Android 10+ blocks executing ELF binaries from writable directories (W^X), so execution runs remotely on Wandbox: code goes out, results come back, APK size unchanged, and C++/Rust/Go work even though they cannot be compiled locally. (2) **The system prompt is now generated** from a single source of truth (`ToolCatalog`) — command examples, the reference table and all rules are derived from it, so adding a command no longer requires editing the prompt by hand. (3) Code execution is **off by default** and must be enabled under Settings → Code execution, with an explicit warning that code is sent to wandbox.org. (4) Fixed a real Wandbox constraint: it names Java sources `prog.java`, so `public class Main` failed to compile — the top-level `public` modifier is now stripped before upload. (5) If you edit the prompt manually your version wins; "Restore default" returns to the generated one. | **Web fetch + HTTP request + jump-to-bottom button.** (1) New `webfetch` command — fetches the body of a given URL (reuses Tavily `/extract`, which returns Markdown that the app renders directly), accepts multiple URLs at once, truncates bodies past 12,000 chars with an explicit note. (2) New `http` command — sends **any** HTTP request (GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS) with custom headers and body, and shows status code plus response headers; meant for calling APIs rather than reading pages. The division of labour between the three network tools is spelled out in the system prompt (search to find, fetch to read, http to call). (3) **Mutating `http` requests (POST/PUT/PATCH/DELETE) require user confirmation**, and the dialog states exactly where the request will be sent. (4) A **persistent "jump to latest" button** in the bottom-right of the chat page, with reserved padding so it never covers messages. Also fixed three bugs found by testing: Okio's `readByteArray(n)` throws EOF when the stream is short (which broke every response under 256 KB), the truncation probe over-read by one byte on chunked transfers, and Tavily error bodies nest `detail` as an object so the error reason was being dropped. |
 | **1.7.0** | 16 | **Web fetch + HTTP request + jump-to-bottom button.** (1) New `webfetch` command — fetches the body of a given URL (reuses Tavily `/extract`, which returns Markdown that the app renders directly), accepts multiple URLs at once, truncates bodies past 12,000 chars with an explicit note. (2) New `http` command — sends **any** HTTP request (GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS) with custom headers and body, and shows status code plus response headers; meant for calling APIs rather than reading pages. The division of labour between the three network tools is spelled out in the system prompt (search to find, fetch to read, http to call). (3) **Mutating `http` requests (POST/PUT/PATCH/DELETE) require user confirmation**, and the dialog states exactly where the request will be sent. (4) A **persistent "jump to latest" button** in the bottom-right of the chat page, with reserved padding so it never covers messages. Also fixed three bugs found by testing: Okio's `readByteArray(n)` throws EOF when the stream is short (which broke every response under 256 KB), the truncation probe over-read by one byte on chunked transfers, and Tavily error bodies nest `detail` as an object so the error reason was being dropped. |
 | **1.6.8** | 15 | **Task list and image rendering fixes.** (1) **Task list checkboxes are now hand-drawn.** Previously rendered with the `☑` / `☐` characters — on most Android devices `☑` falls through to an emoji font and comes out as a bulky 3-D grey block while `☐` uses the text font as a thin outline, so a single list mixed two visual styles that never aligned to the text baseline. Now drawn on a Canvas as a rounded square plus a white tick, fixed at 16dp with proportional corner radius and stroke, so it looks identical everywhere. (2) **Fixed images not showing inside list items.** Only a paragraph that *was* an image and paragraphs with inline images actually rendered them; `- Image: ![x](url)` — an image inside a **list item** — went through inline rendering alone and degraded to a line of alt text, which looks like a broken image. List items and headings now render images too, and inline no longer appends alt text, so a successful load no longer produces a duplicated "alt text + image" pair. |
 | **1.6.7** | 14 | **Links and images, finished.** Two remaining gaps closed: (1) **Reference-style links** `[text][id]` with `[id]: url` definitions at the end of the document (plus the `[text][]` and bare `[id]` shorthand forms), and **bare-URL autolinking** — `https://example.com` becomes tappable on its own, with trailing CJK and ASCII punctuation stripped so the period never ends up inside the URL. (2) **Diagnosable image failures** — instead of a generic "tap to open in browser" the placeholder now reports the actual cause (`server returned 404`, `connection timed out`, `DNS lookup failed`, `HTTPS handshake failed`, `image exceeds 12 MB`, `unrecognised image format`), and the loader follows redirects and sends `Accept: image/*`, so image hosts that 302 now resolve properly. |
@@ -88,12 +89,14 @@ infinite loops).
 | `copy <src> -> <dst>` | Copy a file or directory (recursive for directories) |
 | `move <src> -> <dst>` | Move or rename |
 | `delete <path>` | Delete a file or directory |
+| `run <file or language>` | **Run code** in 30+ languages. File form reads a workspace file; language form runs inline code |
 
 **Aliases**: `ls`=`list`, `cp`=`copy`, `mv`=`move`, `rm`/`del`=`delete`, `md`=`mkdir`,
 `grep`/`find`=`search`, `stat`=`info`.
 `websearch` also accepts `web_search` / `wsearch` / `webs` / `netsearch`;
 `webfetch` also accepts `web_fetch` / `fetch` / `urlfetch` / `geturl`;
-`http` also accepts `httprequest` / `http_request` / `curl` / `request`.
+`http` also accepts `httprequest` / `http_request` / `curl` / `request`;
+`run` also accepts `exec` / `execute` / `runfile`.
 `copy` / `move` arguments may also be space-separated: `cp a.js b.js`.
 
 > ⚠️ `search` and `websearch` are **not the same thing**: the former searches file contents
@@ -311,6 +314,32 @@ background `HeadlessTurnRunner`. The AI in a scheduled task can search too — f
 - `websearch` in a skill allowlist is **independent of** `search`. To keep a skill offline, just omit it
 
 ---
+
+## Running code (`run`)
+
+**Off by default.** Enable it in Settings → Code execution.
+
+````
+```phoclaw:run main.py
+```
+````
+
+````
+```phoclaw:run python
+print(1 + 1)
+```
+````
+
+The first form runs a workspace file; the second runs inline code. Languages are detected by extension: `.py` `.js` `.ts` `.c` `.cpp` `.java` `.go` `.rs` `.sh` `.php` `.rb` `.lua` and more (30+ total).
+
+**Execution is remote (Wandbox).** Android ships no language runtime — only `sh` — and Android 10+ blocks executing ELF binaries from writable directories (W^X), so an on-device sandbox isn't an option. Code is sent to `wandbox.org`; the APK stays the same size, and C++/Rust/Go work even though they cannot be compiled on-device.
+
+Limits:
+
+- **Code leaves your device** — don't run anything containing keys or passwords.
+- The sandbox is isolated: it cannot read other workspace files.
+- Command-line arguments are not supported (no argv channel).
+- Binary executables cannot run (W^X).
 
 ## Scheduled tasks
 

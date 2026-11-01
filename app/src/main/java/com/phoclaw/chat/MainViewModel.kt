@@ -13,6 +13,7 @@ import com.phoclaw.chat.data.AttachmentRepository
 import com.phoclaw.chat.data.AutomationStore
 import com.phoclaw.chat.data.AutomationTask
 import com.phoclaw.chat.data.ChatMessage
+import com.phoclaw.chat.data.CodeRunnerClient
 import com.phoclaw.chat.data.CommandDispatcher
 import com.phoclaw.chat.data.ContentPart
 import com.phoclaw.chat.data.ConversationMeta
@@ -110,6 +111,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val webFetch = WebFetchClient()
     private val httpTool = HttpToolClient()
 
+    /** 远程代码执行。是否真的能用由 `credentials.codeExecEnabled` 决定。 */
+    private val codeRunner = CodeRunnerClient()
+
     /**
      * 联网搜索客户端与 Key。
      *
@@ -122,7 +126,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             tavily = tavily,
             tavilyKey = credentials.tavilyKey,
             webFetch = webFetch,
-            httpClient = httpTool
+            httpClient = httpTool,
+            codeRunner = codeRunner,
+            codeExecEnabled = credentials.codeExecEnabled
         )
 
     private val _state = MutableStateFlow(ChatUiState())

@@ -15,13 +15,18 @@ import com.phoclaw.chat.util.CommandParser
  *   用户没配，此时对应的指令会被明确拒绝
  * @param webFetch 网页抓取客户端。与 [tavily] 共用同一个 Key，但职责独立
  * @param httpClient 通用 HTTP 请求客户端。不需要 Key
+ * @param codeRunner 远程代码执行客户端。代码会发送到 wandbox.org
+ * @param codeExecEnabled 用户是否在设置里打开了「代码执行」。默认关闭 ——
+ *   把代码上传到第三方是明确的数据外发行为，不能让用户被动接受
  */
 class CommandDispatcher(
     private val workspace: WorkspaceRepository,
     private val tavily: TavilyClient? = null,
     private val tavilyKey: String = "",
     private val webFetch: WebFetchClient? = null,
-    private val httpClient: HttpToolClient? = null
+    private val httpClient: HttpToolClient? = null,
+    private val codeRunner: CodeRunnerClient? = null,
+    private val codeExecEnabled: Boolean = false
 ) {
 
     /** 真正执行单条指令，返回给模型看的文本结果。 */
@@ -72,6 +77,9 @@ class CommandDispatcher(
 
         // http 指令：参数行是「方法 URL」，正文是「头 + 空行 + 请求体」
         CommandParser.Command.Action.HTTP -> http(cmd.path, cmd.content)
+
+        // run 指令：参数行是「文件或语言」，正文是内联代码（仅语言形式用）
+        CommandParser.Command.Action.RUN -> run(cmd.path, cmd.content)
     }
 
     /**
@@ -205,6 +213,83 @@ class CommandDispatcher(
             onFailure = { e ->
                 "HTTP 请求失败：${e.message ?: e.javaClass.simpleName}。" +
                         "请确认地址与网络后重试，或改用其它方式完成任务。"
+            }
+        )
+    }
+
+    /**
+     * 运行工作区里的代码，或运行一段内联代码。
+     *
+     * 两种写法：
+     * - `run main.py` —— 读取工作区里的文件内容
+     * - `run python` + 指令块正文 —— 内联代码，适合先验证一小段逻辑
+     *
+     * 执行是**远程**的（Wandbox），这意味着两件事必须讲清楚：
+     * ① 代码会离开设备；② 运行环境是隔离的，读不到工作区的其它文件。
+     * 如果不说明第 ② 点，模型很容易写出「读取 data.txt」然后困惑为什么报错。
+     */
+    private suspend fun run(arg: String, content: String): String {
+        if (!codeExecEnabled) {
+            return "代码执行未启用：用户还没有在「设置 → 代码执行」里打开开关。" +
+                    "请直接告诉用户需要打开它才能运行代码，不要重复尝试。"
+        }
+
+        val client = codeRunner
+            ?: return "代码执行不可用（当前环境未提供该能力）"
+
+        val parts = arg.trim().split(Regex("\\s+")).filter { it.isNotBlank() }
+        if (parts.isEmpty()) {
+            return "请指定要运行的文件或语言，格式：run <文件|语言>，例如 run main.py"
+        }
+
+        val first = parts[0]
+        val extraArgs = parts.drop(1)
+
+        val fileTarget = client.targetForFile(first)
+        val languageTarget = client.targetForLanguage(first)
+
+        if (fileTarget == null && languageTarget == null) {
+            return "无法识别「$first」：既不是支持的文件类型，也不是已知的语言名。" +
+                    "支持的文件类型见提示词里的说明；如果这是二进制文件，Android 不允许运行，请直接告诉用户。"
+        }
+
+        // 没有扩展名、但能当语言名解析 → 内联写法（如 `run python`）
+        val isLanguageForm = fileTarget == null
+        val target = fileTarget ?: languageTarget!!
+
+        val code: String
+        val fileName: String
+        if (isLanguageForm) {
+            if (content.isBlank()) {
+                return "用语言名运行时要提供代码，例如：\n" +
+                        "```phoclaw:run python\nprint(1 + 1)\n```"
+            }
+            code = content
+            fileName = target.defaultFileName
+        } else {
+            code = try {
+                workspace.readText(first)
+            } catch (e: Exception) {
+                return "读取文件失败：${e.message ?: e.javaClass.simpleName}。" +
+                        "请先用 list / read 确认路径是否正确。"
+            }
+            fileName = first.substringAfterLast('/')
+        }
+
+        // Wandbox 没有 argv 通道。静默丢弃参数会让模型以为程序收到了参数、
+        // 从而对着错误的结果继续推理，所以这里必须显式说明
+        val argNote = if (extraArgs.isNotEmpty()) {
+            "注意：命令行参数「${extraArgs.joinToString(" ")}」**没有传进去** —— " +
+                    "远程执行服务不支持 argv。需要参数的话请在代码里写死，或改用标准输入。\n\n"
+        } else {
+            ""
+        }
+
+        return client.run(code, fileName).fold(
+            onSuccess = { argNote + it.formatForModel() },
+            onFailure = { e ->
+                "运行失败：${e.message ?: e.javaClass.simpleName}。" +
+                        "请检查代码与网络；如果是文件类型不支持，换一种语言试试。"
             }
         )
     }
