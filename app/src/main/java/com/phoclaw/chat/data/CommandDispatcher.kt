@@ -18,6 +18,7 @@ import com.phoclaw.chat.util.CommandParser
  * @param codeRunner 远程代码执行客户端。代码会发送到 wandbox.org
  * @param codeExecEnabled 用户是否在设置里打开了「代码执行」。默认关闭 ——
  *   把代码上传到第三方是明确的数据外发行为，不能让用户被动接受
+ * @param memory 长期记忆存储。与工作区**无关**：没授权工作区时记忆照样可用
  */
 class CommandDispatcher(
     private val workspace: WorkspaceRepository,
@@ -26,7 +27,8 @@ class CommandDispatcher(
     private val webFetch: WebFetchClient? = null,
     private val httpClient: HttpToolClient? = null,
     private val codeRunner: CodeRunnerClient? = null,
-    private val codeExecEnabled: Boolean = false
+    private val codeExecEnabled: Boolean = false,
+    private val memory: MemoryStore? = null
 ) {
 
     /** 真正执行单条指令，返回给模型看的文本结果。 */
@@ -80,6 +82,71 @@ class CommandDispatcher(
 
         // run 指令：参数行是「文件或语言」，正文是内联代码（仅语言形式用）
         CommandParser.Command.Action.RUN -> run(cmd.path, cmd.content)
+
+        // memory 指令：参数行是内容或子命令，正文可作为多行内容的备选来源
+        CommandParser.Command.Action.MEMORY -> memory(cmd.path, cmd.content)
+    }
+
+    /**
+     * 长期记忆的读写。
+     *
+     * 参数有三种形态，靠参数行的第一个词区分：
+     * - 空（或只有正文）→ 追加一条
+     * - `forget <关键词>` → 删除匹配的条目
+     * - `list` → 查看全部
+     *
+     * 没有 `clear`：整份清空的风险太高，交给设置页里那个要二次确认的按钮。
+     * 模型误判一次就把用户攒了几个月的记忆清光，这个代价不值得。
+     */
+    private suspend fun memory(rawPath: String, content: String): String {
+        val store = memory ?: return "长期记忆未启用，无法读写。"
+        val arg = buildString {
+            if (rawPath.isNotBlank() && rawPath != ".") append(rawPath)
+            if (content.isNotBlank()) {
+                if (isNotEmpty()) append('\n')
+                append(content)
+            }
+        }.trim()
+
+        if (arg.isEmpty() || arg.equals("list", ignoreCase = true)) {
+            val text = store.load().trim()
+            return if (text.isEmpty()) {
+                "长期记忆目前是空的。用 `memory 内容` 可以写入第一条。"
+            } else {
+                "===== 长期记忆 =====\n$text\n===== 结束 ====="
+            }
+        }
+
+        if (arg.equals("forget", ignoreCase = true) ||
+            arg.startsWith("forget ", ignoreCase = true)
+        ) {
+            // 已经确认以 forget 开头（忽略大小写），直接按长度切，
+            // 免得 removePrefix 对大小写敏感踩坑
+            val keyword = arg.substring("forget".length).trim()
+            if (keyword.isEmpty()) {
+                return "请提供要忘记的关键词，格式：memory forget 关键词"
+            }
+            val removed = store.forget(keyword)
+            return if (removed == 0) {
+                "没有找到包含「$keyword」的记忆。"
+            } else {
+                "已删除 $removed 条包含「$keyword」的记忆。"
+            }
+        }
+
+        return when (val result = store.remember(arg)) {
+            is MemoryStore.RememberResult.Added ->
+                "已记住（当前共 ${result.total} 条）。之后每次对话都会带上这条。"
+            MemoryStore.RememberResult.Duplicate ->
+                "这条内容已经在记忆里了，没有重复写入。"
+            MemoryStore.RememberResult.Empty ->
+                "记忆内容为空，没有写入。"
+            is MemoryStore.RememberResult.Full ->
+                "记忆已满（当前 ${result.currentChars} 字符），没有写入。" +
+                        "请让用户去「设置 → 长期记忆」清理一些不再成立的条目。"
+            is MemoryStore.RememberResult.Failed ->
+                "写入记忆失败：${result.message}"
+        }
     }
 
     /**

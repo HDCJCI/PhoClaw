@@ -44,11 +44,13 @@ import java.io.File
 @Composable
 fun ChatScreen(
     vm: MainViewModel = viewModel(),
-    onOpenHistory: () -> Unit = {}
+    onOpenHistory: () -> Unit = {},
+    onOpenSettings: () -> Unit = {}
 ) {
     val state by vm.state.collectAsState()
     val listState = rememberLazyListState()
     val snackbarHost = remember { SnackbarHostState() }
+    var menuOpen by remember { mutableStateOf(false) }
 
     // 目录选择器：打开系统 SAF，让用户挑一个工作区目录
     val picker = rememberLauncherForActivityResult(
@@ -165,6 +167,55 @@ fun ChatScreen(
                     IconButton(onClick = { vm.newSession() }) {
                         Icon(Icons.Default.AddComment, contentDescription = "新会话")
                     }
+                    /*
+                     * 更多菜单。
+                     *
+                     * 压缩放在这里而不是单独一个图标：它不是高频操作，
+                     * 挤在顶栏里会和「历史」「新会话」抢注意力。
+                     * 压缩期间把图标换成进度圈 —— 这个操作要调一次模型，
+                     * 可能持续好几秒，没有反馈的话用户会以为点了没反应。
+                     */
+                    Box {
+                        IconButton(onClick = { menuOpen = true }) {
+                            if (state.isCompressing) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(18.dp),
+                                    strokeWidth = 2.dp
+                                )
+                            } else {
+                                Icon(Icons.Default.MoreVert, contentDescription = "更多")
+                            }
+                        }
+                        DropdownMenu(
+                            expanded = menuOpen,
+                            onDismissRequest = { menuOpen = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = {
+                                    Column {
+                                        Text("压缩上下文")
+                                        Text(
+                                            text = contextLabel(state),
+                                            fontSize = 11.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                },
+                                enabled = !state.isCompressing && state.messages.isNotEmpty(),
+                                onClick = {
+                                    menuOpen = false
+                                    vm.compressContextNow()
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("长期记忆") },
+                                onClick = {
+                                    menuOpen = false
+                                    onOpenSettings()
+                                }
+                            )
+                        }
+                    }
                 }
             )
         }
@@ -195,6 +246,12 @@ fun ChatScreen(
                 ) {
                     if (state.messages.isEmpty()) {
                         item { EmptyHint(hasWorkspace = state.workspaceReady) }
+                    }
+                    // 压缩提示条。放在最顶部而不是底部：用户往上翻的时候
+                    // 第一个看到的就是「这里之后的记录不在模型脑子里了」，
+                    // 正好对应他要确认的事
+                    if (state.summarizedCount > 0) {
+                        item { CompressionNotice(state.summarizedCount) }
                     }
                     // 内部消息（工具结果回灌、附件内容注入）不渲染气泡，
                     // 但其挂载的工具日志要展示
@@ -283,6 +340,52 @@ private fun WorkspacePrompt(onPick: () -> Unit) {
                 fontSize = 13.sp
             )
             TextButton(onClick = onPick) { Text("选择") }
+        }
+    }
+}
+
+/**
+ * 顶栏菜单里那行副标题。
+ *
+ * 压缩按钮本身不带数字，用户看不到「还剩多少」。把当前估算占用放在标题下面，
+ * 点开菜单就知道该不该压 —— token 数比任何进度条都直观。
+ */
+private fun contextLabel(state: ChatUiState): String = when {
+    state.isCompressing -> "正在压缩…"
+    state.contextTokens <= 0 -> "把早期对话压成摘要"
+    state.contextTokens >= 10_000 -> "当前约 ${state.contextTokens / 1000}k token"
+    else -> "当前约 ${state.contextTokens} token"
+}
+
+/**
+ * 「更早的 N 条已压缩」提示条。
+ *
+ * 必须显示：不显示的话，用户会以为是模型突然变笨了 —— 明明上面刚说过的事，
+ * 模型却答不上来。这一行字解释了原因，也告诉用户原文还在。
+ */
+@Composable
+private fun CompressionNotice(count: Int) {
+    Surface(
+        color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.55f),
+        shape = RoundedCornerShape(10.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                Icons.Default.Info,
+                contentDescription = null,
+                modifier = Modifier.size(14.dp),
+                tint = MaterialTheme.colorScheme.onSecondaryContainer
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                text = "更早的 $count 条已压缩成摘要，发给模型的只有摘要；往下翻仍能看到全文",
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSecondaryContainer
+            )
         }
     }
 }

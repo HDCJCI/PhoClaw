@@ -3,6 +3,7 @@ package com.phoclaw.chat.data
 import android.content.Context
 import android.util.Log
 import com.phoclaw.chat.util.CommandParser
+import com.phoclaw.chat.util.SystemPromptBuilder
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.collect
 import java.util.UUID
@@ -96,10 +97,18 @@ class HeadlessTurnRunner(
         )
 
         val activeSkills = runCatching { skillStore.enabled() }.getOrDefault(emptyList())
-        val systemPrompt = PromptComposer.compose(credentials.systemPrompt, activeSkills)
+        val basePrompt = PromptComposer.compose(credentials.systemPrompt, activeSkills)
+        // 长期记忆对定时任务同样有效 —— 而且更需要：后台跑的时候没人能在旁边
+        // 补充「别动 src/legacy 那个目录」。开关与前台共用同一个。
+        val memoryStore = MemoryStore(app)
+        val systemPrompt = if (credentials.memoryEnabled) {
+            SystemPromptBuilder.withMemory(basePrompt, runCatching { memoryStore.forPrompt() }.getOrDefault(""))
+        } else {
+            basePrompt
+        }
         val whitelist = PromptComposer.effectiveWhitelist(activeSkills)
 
-        // 联网搜索、网页抓取、HTTP 请求、代码执行在后台任务里同样可用。
+        // 联网搜索、网页抓取、HTTP 请求、代码执行、长期记忆在后台任务里同样可用。
         // 这里的 dispatcher 每次 run 都新建，保证拿到的是当前最新的 Key 与开关状态
         val dispatcher = CommandDispatcher(
             workspace = workspace,
@@ -108,7 +117,8 @@ class HeadlessTurnRunner(
             webFetch = WebFetchClient(),
             httpClient = HttpToolClient(),
             codeRunner = CodeRunnerClient(),
-            codeExecEnabled = credentials.codeExecEnabled
+            codeExecEnabled = credentials.codeExecEnabled,
+            memory = memoryStore
         )
         var lastAssistantText = ""
         var round = 0
@@ -248,7 +258,27 @@ class HeadlessTurnRunner(
             if (msg.text.isBlank() && msg.attachments.isEmpty()) return@forEach
             list += ChatMessage(msg.role, msg.toPlainText())
         }
-        return list
+        return shrinkOversized(list, credentials.contextBudget)
+    }
+
+    /**
+     * 单条消息过长时截断。
+     *
+     * 后台任务不做滚动摘要（每次执行本来就是独立的一轮，压历史收益不大），
+     * 但「一条就把预算吃光」这个坑必须堵住 —— 定时任务里最容易出现的事就是
+     * `read` 一个巨大日志，然后 8 轮循环每轮都发一遍。
+     */
+    private fun shrinkOversized(messages: List<ChatMessage>, budget: Int): List<ChatMessage> {
+        val cap = (budget * 0.35).toInt().coerceAtLeast(2_000)
+        return messages.map { msg ->
+            if (msg.role == ChatMessage.ROLE_SYSTEM) return@map msg
+            val est = TokenEstimator.estimate(msg)
+            if (est <= cap || msg.content.isEmpty()) return@map msg
+            val keep = (msg.content.length.toLong() * cap / est)
+                .toInt().coerceIn(400, msg.content.length)
+            val head = msg.content.substring(0, keep)
+            msg.copy(content = head.substringBeforeLast('\n', head) + "\n\n…（本条过长，已截断）")
+        }
     }
 
     /** 附件降级成文字占位，不重发字节。 */

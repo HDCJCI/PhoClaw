@@ -23,6 +23,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.phoclaw.chat.data.MemoryStore
 import com.phoclaw.chat.util.BaseUrlHint
 import kotlinx.coroutines.launch
 
@@ -51,6 +52,23 @@ fun SettingsScreen(
 
     // 代码执行（默认关闭）
     var codeExecEnabled by remember { mutableStateOf(store.codeExecEnabled) }
+
+    // 长期记忆
+    var memoryEnabled by remember { mutableStateOf(store.memoryEnabled) }
+    var memoryText by remember { mutableStateOf("") }
+    var memoryStats by remember { mutableStateOf(MemoryStore.Stats(0, 0)) }
+    var confirmClearMemory by remember { mutableStateOf(false) }
+
+    // 上下文压缩
+    var autoCompress by remember { mutableStateOf(store.autoCompress) }
+    var budgetText by remember { mutableStateOf(store.contextBudget.toString()) }
+    var keepRecentText by remember { mutableStateOf(store.keepRecent.toString()) }
+
+    // 记忆正文在 IO 线程读，进来时加载一次即可
+    LaunchedEffect(Unit) {
+        memoryText = vm.memory.load()
+        memoryStats = vm.memory.stats()
+    }
 
     // 提示词是否已被用户固定。未固定时它随工具表自动生成
     var promptCustomized by remember { mutableStateOf(store.hasCustomSystemPrompt) }
@@ -413,6 +431,180 @@ fun SettingsScreen(
 
             HorizontalDivider()
 
+            // ---------------- 长期记忆 ----------------
+            Text("长期记忆", style = MaterialTheme.typography.titleMedium)
+
+            Text(
+                "AI 会把这些内容带进**每一轮**对话，不用每次重复交代。存在 App 私有目录里，" +
+                        "换工作区也不会丢。你也可以直接对它说「记住…」，它会自己写进来。",
+                fontSize = 12.sp,
+                lineHeight = 18.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("注入到每轮对话", fontSize = 14.sp)
+                    Text(
+                        if (memoryEnabled) "已开启 · 记忆会影响之后所有对话"
+                        else "已关闭 · 内容保留但不发给模型",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = memoryEnabled,
+                    onCheckedChange = { checked ->
+                        memoryEnabled = checked
+                        store.memoryEnabled = checked
+                    }
+                )
+            }
+
+            OutlinedTextField(
+                value = memoryText,
+                onValueChange = { memoryText = it },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 140.dp),
+                textStyle = MaterialTheme.typography.bodySmall
+                    .copy(fontFamily = FontFamily.Monospace),
+                placeholder = {
+                    Text(
+                        "空的时候可以让 AI 自己写，也可以在这里手写，比如：\n- 用户偏好深色主题\n- 项目用 Kotlin 2.0，不要建议降到 1.x",
+                        fontSize = 12.sp
+                    )
+                },
+                supportingText = {
+                    Text(
+                        "${memoryStats.entries} 条 · ${memoryStats.chars} 字符" +
+                                "（上限 ${MemoryStore.MAX_FILE_CHARS} 字符 / ${MemoryStore.MAX_ENTRIES} 条）",
+                        fontSize = 11.sp
+                    )
+                }
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedButton(
+                    onClick = {
+                        scope.launch {
+                            vm.memory.save(memoryText)
+                                .onSuccess {
+                                    // 必须重新载入缓存，否则用户改完记忆、
+                                    // 下一句话却没生效，会以为是功能坏了
+                                    vm.reloadMemory()
+                                    memoryStats = vm.memory.stats()
+                                    snackbarHost.showSnackbar("记忆已保存")
+                                }
+                                .onFailure {
+                                    snackbarHost.showSnackbar("保存失败：${it.message}")
+                                }
+                        }
+                    },
+                    modifier = Modifier.weight(1f)
+                ) { Text("保存记忆") }
+
+                TextButton(
+                    onClick = { confirmClearMemory = true },
+                    modifier = Modifier.weight(1f)
+                ) { Text("清空", color = MaterialTheme.colorScheme.error) }
+            }
+
+            Text(
+                "记忆写多了会挤占上下文。AI 自己也会往里写，定期清掉不再成立的内容 ——" +
+                        "比如「这个项目已完结」之类过期的东西。",
+                fontSize = 11.sp,
+                lineHeight = 16.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            HorizontalDivider()
+
+            // ---------------- 上下文压缩 ----------------
+            Text("上下文压缩", style = MaterialTheme.typography.titleMedium)
+
+            Text(
+                "对话变长之后，早期消息会被**压成摘要**再发给模型，而不是原样全发。" +
+                        "界面里的记录一条都不会少，只是模型看到的是浓缩版 —— " +
+                        "不这样做的话，聊到一定长度请求会被后端直接拒绝。",
+                fontSize = 12.sp,
+                lineHeight = 18.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("超预算时自动压缩", fontSize = 14.sp)
+                    Text(
+                        if (autoCompress) "已开启 · 压缩会额外调用一次模型"
+                        else "已关闭 · 长对话最终会因超长报错",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = autoCompress,
+                    onCheckedChange = { checked ->
+                        autoCompress = checked
+                        store.autoCompress = checked
+                    }
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                OutlinedTextField(
+                    value = budgetText,
+                    onValueChange = { v ->
+                        val digits = v.filter { it.isDigit() }.take(7)
+                        budgetText = digits
+                        // 删光时保留旧值，不要因为一次退格就跳到最小值
+                        digits.toIntOrNull()?.let { store.contextBudget = it }
+                    },
+                    label = { Text("上下文预算", fontSize = 11.sp) },
+                    suffix = { Text("token", fontSize = 11.sp) },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.weight(1f)
+                )
+                OutlinedTextField(
+                    value = keepRecentText,
+                    onValueChange = { v ->
+                        val digits = v.filter { it.isDigit() }.take(2)
+                        keepRecentText = digits
+                        digits.toIntOrNull()?.let { store.keepRecent = it }
+                    },
+                    label = { Text("保留最近", fontSize = 11.sp) },
+                    suffix = { Text("条", fontSize = 11.sp) },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.weight(1f)
+                )
+            }
+
+            Text(
+                "预算按模型的上下文窗口估：64k 的模型填 32000 比较稳，" +
+                        "128k 的可以填到 60000。估算是按字符数量级推的，留足余量比精确更重要。\n" +
+                        "「保留最近」是每次压缩时不动的那几条，压缩会在完整问答之间切分，" +
+                        "不会把一问一答拆散。",
+                fontSize = 11.sp,
+                lineHeight = 16.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            HorizontalDivider()
+
             Text("系统提示词", style = MaterialTheme.typography.titleMedium)
             OutlinedTextField(
                 value = systemPrompt,
@@ -459,5 +651,44 @@ fun SettingsScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
+    }
+
+    /*
+     * 清空记忆要二次确认。
+     *
+     * 这不是多此一举：记忆是唯一「AI 会自己往里写」的数据，用户可能已经
+     * 攒了几个月的偏好，误触清掉就全没了，而且没有回收站。
+     */
+    if (confirmClearMemory) {
+        AlertDialog(
+            onDismissRequest = { confirmClearMemory = false },
+            title = { Text("清空长期记忆？") },
+            text = {
+                Text(
+                    "共 ${memoryStats.entries} 条、${memoryStats.chars} 字符，" +
+                            "清空后无法恢复。如果只想删掉其中几条，可以自己编辑上面的内容再保存。"
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmClearMemory = false
+                    scope.launch {
+                        vm.memory.clear()
+                            .onSuccess {
+                                memoryText = ""
+                                memoryStats = MemoryStore.Stats(0, 0)
+                                vm.reloadMemory()
+                                snackbarHost.showSnackbar("长期记忆已清空")
+                            }
+                            .onFailure {
+                                snackbarHost.showSnackbar("清空失败：${it.message}")
+                            }
+                    }
+                }) { Text("清空", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmClearMemory = false }) { Text("取消") }
+            }
+        )
     }
 }

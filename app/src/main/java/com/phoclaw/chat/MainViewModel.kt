@@ -16,10 +16,12 @@ import com.phoclaw.chat.data.ChatMessage
 import com.phoclaw.chat.data.CodeRunnerClient
 import com.phoclaw.chat.data.CommandDispatcher
 import com.phoclaw.chat.data.ContentPart
+import com.phoclaw.chat.data.ContextCompressor
 import com.phoclaw.chat.data.ConversationMeta
 import com.phoclaw.chat.data.ConversationStore
 import com.phoclaw.chat.data.CredentialStore
 import com.phoclaw.chat.data.LlmClient
+import com.phoclaw.chat.data.MemoryStore
 import com.phoclaw.chat.data.PendingAttachment
 import com.phoclaw.chat.data.PromptComposer
 import com.phoclaw.chat.data.Skill
@@ -30,9 +32,11 @@ import com.phoclaw.chat.data.StoredConversation
 import com.phoclaw.chat.data.StoredMessage
 import com.phoclaw.chat.data.HttpToolClient
 import com.phoclaw.chat.data.TavilyClient
+import com.phoclaw.chat.data.TokenEstimator
 import com.phoclaw.chat.data.WebFetchClient
 import com.phoclaw.chat.data.WorkspaceRepository
 import com.phoclaw.chat.util.CommandParser
+import com.phoclaw.chat.util.SystemPromptBuilder
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -91,7 +95,18 @@ data class ChatUiState(
     /** 当前会话的标题，显示在顶栏。 */
     val conversationTitle: String = DEFAULT_TITLE,
     /** 输入框上方待发送的附件暂存区。 */
-    val pendingAttachments: List<PendingAttachment> = emptyList()
+    val pendingAttachments: List<PendingAttachment> = emptyList(),
+    /**
+     * 已被摘要覆盖的消息条数，0 表示没压缩过。
+     *
+     * 界面据此显示「更早的 N 条已压缩成摘要」—— 用户不会莫名其妙地
+     * 发现模型忘了前面聊过什么。
+     */
+    val summarizedCount: Int = 0,
+    /** 当前上下文的估算占用（token）。让用户在撞墙之前先看到快满了。 */
+    val contextTokens: Int = 0,
+    /** 正在压缩上下文。压缩要额外调一次模型，可能持续几秒。 */
+    val isCompressing: Boolean = false
 )
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
@@ -114,6 +129,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** 远程代码执行。是否真的能用由 `credentials.codeExecEnabled` 决定。 */
     private val codeRunner = CodeRunnerClient()
 
+    /** 跨会话长期记忆（`files/MEMORY.md`）。 */
+    private val memoryStore = MemoryStore(app)
+
+    /** 上下文压缩器。调模型做摘要，所以复用同一个 [llm]。 */
+    private val compressor = ContextCompressor(llm)
+
     /**
      * 联网搜索客户端与 Key。
      *
@@ -128,7 +149,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             webFetch = webFetch,
             httpClient = httpTool,
             codeRunner = codeRunner,
-            codeExecEnabled = credentials.codeExecEnabled
+            codeExecEnabled = credentials.codeExecEnabled,
+            memory = memoryStore
         )
 
     private val _state = MutableStateFlow(ChatUiState())
@@ -193,6 +215,30 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      */
     private var turnImageCache: Map<String, String> = emptyMap()
 
+    /**
+     * 长期记忆正文的缓存。
+     *
+     * 每一轮对话开始时刷新一次（用户可能在设置页里刚改过），
+     * 而不是每次都读盘 —— [buildApiMessages] 在 8 轮循环里会被调 8 次。
+     */
+    @Volatile
+    private var memoryCache: String = ""
+
+    /**
+     * 当前会话的滚动摘要，以及它**覆盖了多少条 API 消息**。
+     *
+     * 计数用的是「过滤后要发给模型的消息」的下标，不是界面消息的下标：
+     * 界面里还有 toolLog 气泡、纯图片消息等不进上下文的东西，两者对不上。
+     *
+     * 每次 [openConversation] / [newSession] 都要跟着切换，否则会把上一个
+     * 会话的摘要带进新会话 —— 那是很难察觉的串味 bug。
+     */
+    @Volatile
+    private var currentSummary: String = ""
+
+    @Volatile
+    private var currentSummarizedCount: Int = 0
+
     /** 当前等待用户确认的危险操作。用户点「允许 / 拒绝」时完成它。 */
     private var approvalDeferred: CompletableDeferred<Boolean>? = null
 
@@ -240,6 +286,23 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             refreshSkills()
             refreshAutomations()
             refreshExactAlarmState()
+            // 记忆正文也在这里预热：首轮对话时 [buildApiMessages] 已经能用上
+            memoryCache = memoryStore.forPrompt()
+        }
+    }
+
+    /** 供设置页读写长期记忆。 */
+    val memory: MemoryStore get() = memoryStore
+
+    /**
+     * 重新读取记忆并刷新缓存。
+     *
+     * 设置页保存后必须调一次，否则用户改完记忆、下一句对话却没生效，
+     * 会以为是功能坏了。
+     */
+    fun reloadMemory() {
+        viewModelScope.launch {
+            memoryCache = memoryStore.forPrompt()
         }
     }
 
@@ -348,13 +411,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         persistCurrentConversation(immediate = true)
         conversationId = newId()
         conversationExists = false
+        // 摘要跟着会话走：不清的话，上个会话的摘要会被带进新会话，
+        // 模型会一脸茫然地接着聊一个用户根本没提过的话题
+        currentSummary = ""
+        currentSummarizedCount = 0
         _state.update {
             it.copy(
                 messages = emptyList(),
                 isStreaming = false,
                 conversationTitle = DEFAULT_TITLE,
                 // 待发送附件属于「上一个会话的输入」，切会话时一并清掉
-                pendingAttachments = emptyList()
+                pendingAttachments = emptyList(),
+                summarizedCount = 0,
+                contextTokens = 0
             )
         }
     }
@@ -373,10 +442,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val stored = conversations.load(last.id) ?: return@launch
             conversationId = stored.id
             conversationExists = true
+            // 冷启动恢复也要带摘要，否则「重启一次就失忆」——
+            // 恰恰是压缩功能最让人怀疑有没有用的时刻
+            currentSummary = stored.summary
+            currentSummarizedCount = stored.summarizedCount
             _state.update {
                 it.copy(
                     messages = stored.messages.map { m -> m.toUiMessage() },
-                    conversationTitle = stored.title
+                    conversationTitle = stored.title,
+                    summarizedCount = stored.summarizedCount
                 )
             }
         }
@@ -400,13 +474,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
             conversationId = stored.id
             conversationExists = true
+            // 摘要随会话恢复，否则重开之后模型会「忘掉」被压缩的那段
+            currentSummary = stored.summary
+            currentSummarizedCount = stored.summarizedCount
             _state.update {
                 it.copy(
                     messages = stored.messages.map { m -> m.toUiMessage() },
                     isStreaming = false,
                     conversationTitle = stored.title,
                     // 换会话时清掉上一个会话残留的待发送附件
-                    pendingAttachments = emptyList()
+                    pendingAttachments = emptyList(),
+                    summarizedCount = stored.summarizedCount,
+                    contextTokens = 0
                 )
             }
         }
@@ -422,12 +501,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 streamJob?.cancel()
                 conversationId = newId()
                 conversationExists = false
+                currentSummary = ""
+                currentSummarizedCount = 0
                 _state.update {
                     it.copy(
                         messages = emptyList(),
                         isStreaming = false,
                         conversationTitle = DEFAULT_TITLE,
-                        pendingAttachments = emptyList()
+                        pendingAttachments = emptyList(),
+                        summarizedCount = 0
                     )
                 }
             }
@@ -444,12 +526,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             attachments.clearAll()
             conversationId = newId()
             conversationExists = false
+            currentSummary = ""
+            currentSummarizedCount = 0
             _state.update {
                 it.copy(
                     messages = emptyList(),
                     isStreaming = false,
                     conversationTitle = DEFAULT_TITLE,
                     pendingAttachments = emptyList(),
+                    summarizedCount = 0,
+                    contextTokens = 0,
                     banner = "历史记录已清空"
                 )
             }
@@ -483,7 +569,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         id = conversationId,
                         title = title,
                         updatedAt = System.currentTimeMillis(),
-                        messages = messages
+                        messages = messages,
+                        // 摘要在落盘这一刻快照下来。用字段当前值而不是压缩时的
+                        // 局部变量 —— 期间可能又压过一次
+                        summary = currentSummary,
+                        summarizedCount = currentSummarizedCount
                     )
                 )
             }.onSuccess {
@@ -608,6 +698,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val anchor = currentTurnAnchorIndex()
             prepareTurnImages()
             if (anchor >= 0) injectTextAttachments(anchor)
+
+            // 压缩放在附件注入之后、第一轮请求之前：
+            // 这时上下文已经是「这一轮真正要发出去的全部内容」，估算才准。
+            // 只做一次，不放进下面的工具循环 —— 否则一次提问会压好几遍
+            if (credentials.autoCompress) {
+                val report = maybeCompressContext()
+                if (report.degraded) {
+                    _state.update { it.copy(banner = report.message) }
+                }
+            }
 
             var round = 0
             while (round < MAX_ROUNDS) {
@@ -866,24 +966,66 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 "如果这影响回答，请提示用户切换支持视觉的模型。"
 
     /**
+     * 拼出这一轮的 system 消息。
+     *
+     * 三块内容合成**一条** system：
+     * 1. 基础提示词（含已激活技能）
+     * 2. 长期记忆 `MEMORY.md`
+     * 3. 早期对话的滚动摘要
+     *
+     * 不拆成多条：部分自建网关只认第一条 system，后面的会被静默丢弃 ——
+     * 拆开等于白写，而且很难排查。
+     */
+    private fun systemText(): String {
+        val base = PromptComposer.compose(
+            credentials.systemPrompt,
+            _skills.value.filter { it.enabled }
+        )
+        val withMemory = if (credentials.memoryEnabled) {
+            SystemPromptBuilder.withMemory(base, memoryCache)
+        } else {
+            base
+        }
+        if (currentSummary.isBlank() || currentSummarizedCount <= 0) return withMemory
+
+        return buildString {
+            append(withMemory)
+            appendLine()
+            appendLine()
+            appendLine("## 早期对话摘要")
+            appendLine()
+            appendLine("下面是更早的对话压缩而成的摘要，**不是用户的原话**。此后出现的消息才是近期原文。")
+            appendLine("摘要里提到的结论、路径、待办依然有效，可以直接引用；如果它与近期原文冲突，以近期原文为准。")
+            appendLine()
+            append(currentSummary)
+        }
+    }
+
+    /**
      * 把界面消息转换成发给 API 的上下文。
      *
      * 三种形态：
      * - 当前轮 + 图片 + 开关开 → `parts` 非空，序列化成多模态数组
      * - 当前轮 + 图片 + 开关关 → 纯字符串，附一句文字说明
      * - 其余（含历史消息）→ 纯字符串，图片变成 `[图片 xxx.png]` 占位
+     *
+     * 已被摘要覆盖的前 [currentSummarizedCount] 条**不再发送**，正文只留在
+     * 界面上给用户看。下标口径与 [ContextCompressor] 一致：都按「过滤后
+     * 要发送的消息」计数，不是界面消息的下标。
+     *
+     * @param skipSummarized 是否跳过已被摘要覆盖的部分。压缩器需要看**完整**
+     *   列表才能算出切分点，传 false；正常发送传 true。
      */
-    private fun buildApiMessages(): List<ChatMessage> {
+    private fun buildApiMessages(skipSummarized: Boolean = true): List<ChatMessage> {
         val list = mutableListOf<ChatMessage>()
 
-        // 基础提示词与已激活技能合成。没有激活技能时原样返回基础提示词，
-        // 保证既有对话行为一字不变
-        val system = PromptComposer.compose(credentials.systemPrompt, _skills.value.filter { it.enabled })
+        val system = systemText()
         if (system.isNotBlank()) {
             list += ChatMessage(ChatMessage.ROLE_SYSTEM, system)
         }
 
         val anchor = currentTurnAnchorIndex()
+        var apiIndex = 0
 
         _state.value.messages.forEachIndexed { index, msg ->
             // 与原先一致：只要 user 和 assistant。
@@ -893,6 +1035,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 return@forEachIndexed
             }
             if (msg.text.isBlank() && msg.attachments.isEmpty()) return@forEachIndexed
+
+            // 先记下这条在「发送序列」里的位置，再判断是否已被摘要覆盖。
+            // 顺序不能反：先自增再比较的话，被覆盖的区间会整体错位一条
+            val covered = skipSummarized && apiIndex < currentSummarizedCount
+            apiIndex++
+            if (covered) return@forEachIndexed
 
             val isCurrentTurn = index == anchor
             if (!isCurrentTurn) {
@@ -919,7 +1067,182 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             images.forEach { (_, b64) -> parts += ContentPart.Image(mime = "image/jpeg", base64 = b64) }
             list += ChatMessage(msg.role, msg.text, parts = parts)
         }
-        return list
+        // 兜底：单条超长就地削。必须放在最后，前面所有分支都可能产出一条巨长的消息
+        return shrinkOversized(list, credentials.contextBudget)
+    }
+
+    // ---------------------------------------------------------------- 上下文压缩
+
+    /** 压缩结果，用于给界面一句人话。 */
+    private data class CompressReport(
+        val compressed: Boolean,
+        val message: String,
+        /** 压缩失败并已降级为「直接丢弃最早若干条」。 */
+        val degraded: Boolean = false
+    )
+
+    /**
+     * **完整**的上下文消息（不含 system），供压缩器分析。
+     *
+     * 这里必须传 `skipSummarized = false`：压缩器要自己按 [currentSummarizedCount]
+     * 跳过已覆盖的部分，再算切分点。如果这里先跳一遍，压缩器再 drop 一次，
+     * 就会双重跳过 —— 表现为压缩点一路往后窜、越压越狠，而且切分下标与
+     * 发送时的下标彻底对不上。
+     */
+    private fun contextMessages(): List<ChatMessage> =
+        buildApiMessages(skipSummarized = false)
+            .filter { it.role != ChatMessage.ROLE_SYSTEM }
+
+    /**
+     * 超预算就把早期对话压成摘要。
+     *
+     * 调用点只有两个：[runTurn] 开头（自动）和聊天页的手动入口。
+     * **不要**放进 8 轮工具循环里 —— 那样一次用户提问会触发多次压缩请求，
+     * 白白烧钱，而且会把刚刚注入的工具结果也压掉。
+     *
+     * @param force 手动触发时忽略预算，压到「只剩最近几条」为止
+     */
+    private suspend fun maybeCompressContext(force: Boolean = false): CompressReport {
+        if (!credentials.isConfigured) {
+            return CompressReport(false, "还没有配置 API Key，无法压缩")
+        }
+        val messages = contextMessages()
+        val baseTokens = TokenEstimator.estimate(systemText())
+        val budget = credentials.contextBudget
+        // 只算「真正要发的部分」：被摘要覆盖的那些已经不在请求里了。
+        // 这里若按全量算，压过一次之后每轮都会判超预算，白跑一趟压缩逻辑
+        val used = baseTokens +
+                TokenEstimator.estimate(currentSummary) +
+                TokenEstimator.estimate(messages.drop(currentSummarizedCount))
+
+        if (!force && used <= budget) {
+            _state.update { it.copy(contextTokens = used) }
+            return CompressReport(false, "上下文还有余量（约 $used / $budget）")
+        }
+        // 还没被压缩的条数都不到保留上限，压了也没有意义
+        if (messages.size - currentSummarizedCount <= credentials.keepRecent) {
+            return CompressReport(false, "消息太少，没有可压缩的内容")
+        }
+
+        _state.update { it.copy(isCompressing = true) }
+        val target = if (force) (budget * 0.6).toInt() else budget
+
+        val outcome = compressor.compressIfNeeded(
+            baseUrl = credentials.baseUrl,
+            apiKey = credentials.apiKey,
+            model = credentials.model,
+            summary = currentSummary,
+            summarizedCount = currentSummarizedCount,
+            messages = messages,
+            baseTokens = baseTokens,
+            budgetTokens = target,
+            keepRecent = credentials.keepRecent
+        )
+
+        return when (outcome) {
+            is ContextCompressor.Outcome.NotNeeded -> {
+                _state.update { it.copy(isCompressing = false, contextTokens = outcome.usedTokens) }
+                CompressReport(false, "当前上下文约 ${outcome.usedTokens} token，未超过预算")
+            }
+
+            is ContextCompressor.Outcome.Compressed -> {
+                currentSummary = outcome.summary
+                currentSummarizedCount = outcome.summarizedCount
+                val after = baseTokens +
+                        TokenEstimator.estimate(currentSummary) +
+                        TokenEstimator.estimate(messages.drop(currentSummarizedCount))
+                _state.update {
+                    it.copy(
+                        isCompressing = false,
+                        summarizedCount = outcome.summarizedCount,
+                        contextTokens = after
+                    )
+                }
+                // 摘要要落盘，否则重开会话后模型又「失忆」了
+                persistCurrentConversation(immediate = true)
+                CompressReport(
+                    true,
+                    "已把前 ${outcome.summarizedCount} 条压成摘要，" +
+                            "上下文从约 $used 降到约 $after token"
+                )
+            }
+
+            is ContextCompressor.Outcome.Failed -> {
+                // 压缩失败不等于对话要挂：退回滑动窗口，直接把最老的丢掉。
+                // 信息有损，但总比请求被后端拒绝、整个对话卡死强。
+                val fallbackCut = (messages.size - credentials.keepRecent)
+                    .coerceAtLeast(1)
+                    .coerceAtMost(messages.size)
+                if (fallbackCut <= currentSummarizedCount) {
+                    _state.update { it.copy(isCompressing = false) }
+                    return CompressReport(false, outcome.reason)
+                }
+                currentSummarizedCount = fallbackCut
+                if (currentSummary.isBlank()) {
+                    currentSummary = "（更早的对话因压缩失败已省略，只保留最近的原文。）"
+                }
+                _state.update {
+                    it.copy(
+                        isCompressing = false,
+                        summarizedCount = fallbackCut,
+                        contextTokens = baseTokens + TokenEstimator.estimate(messages.drop(fallbackCut))
+                    )
+                }
+                persistCurrentConversation(immediate = true)
+                CompressReport(
+                    true,
+                    "${outcome.reason}\n已临时丢弃最早的 $fallbackCut 条以腾出空间（界面记录不受影响）。",
+                    degraded = true
+                )
+            }
+        }
+    }
+
+    /**
+     * 手动压缩入口（聊天页顶栏）。
+     *
+     * 强制模式：不看预算，直接压到「大约六成预算」，适合用户主动想省 token
+     * 或者模型开始明显记不住前面内容的时候。
+     */
+    fun compressContextNow() {
+        if (_state.value.isStreaming) {
+            _state.update { it.copy(banner = "正在生成回复，稍后再压缩") }
+            return
+        }
+        if (_state.value.isCompressing) return
+        viewModelScope.launch {
+            val report = maybeCompressContext(force = true)
+            _state.update { it.copy(banner = report.message) }
+        }
+    }
+
+    /**
+     * 单条消息过长时的兜底截断。
+     *
+     * 压缩解决「条数太多」，解决不了「一条就是 20 万 token」—— 比如 `read`
+     * 一个几 MB 的日志、或者 `http` 拉回来一大坨 JSON。这种消息无论怎么压
+     * 早期对话都还在，只能就地削。
+     *
+     * 只削发给模型的那份，界面上的原文不动 —— 用户想看的还是全的。
+     */
+    private fun shrinkOversized(messages: List<ChatMessage>, budget: Int): List<ChatMessage> {
+        // 单条上限取预算的 35%：给对话本身留出空间，也避免一条把摘要挤没
+        val cap = (budget * 0.35).toInt().coerceAtLeast(MIN_SINGLE_MESSAGE_TOKENS)
+        return messages.map { msg ->
+            if (msg.role == ChatMessage.ROLE_SYSTEM) return@map msg
+            val est = TokenEstimator.estimate(msg)
+            if (est <= cap || msg.content.isEmpty()) return@map msg
+
+            // 按比例反推该留多少字符，再在行末断开，别把一行的中间切掉
+            val keepChars = (msg.content.length.toLong() * cap / est)
+                .toInt().coerceIn(400, msg.content.length)
+            val head = msg.content.substring(0, keepChars)
+            val cut = head.substringBeforeLast('\n', head)
+            msg.copy(
+                content = "$cut\n\n…（本条内容过长，已截断。原文 ${msg.content.length} 字符，" +
+                        "约 $est token；界面里仍是完整内容）"
+            )
+        }
     }
 
     // ---------------------------------------------------------------- 指令执行
@@ -1238,5 +1561,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
          * 直接超出多数模型的上下文窗口，而且报错信息通常难以理解。
          */
         const val MAX_INLINE_TEXT_TOTAL = 200 * 1024
+
+        /**
+         * 单条消息截断的下限。
+         *
+         * 预算调得很小时（比如 4000 token），35% 只有 1400，截得太狠会让
+         * 工具结果完全没法用。保底 2000 反而比「严格按预算」更实用 ——
+         * 压缩器会把总预算再拉回来。
+         */
+        const val MIN_SINGLE_MESSAGE_TOKENS = 2_000
     }
 }

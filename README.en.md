@@ -2,7 +2,7 @@
 
 An Android app that runs on your phone, holds a conversation, and reads/writes files in your workspace directly.(Just software made out of boredom)
 
-**Current version: v1.8.0** (versionCode 17)
+**Current version: v1.9.0** (versionCode 18)
 
 [中文文档](README.md) · **English**
 
@@ -18,6 +18,7 @@ An Android app that runs on your phone, holds a conversation, and reads/writes f
 
 | Version | versionCode | Changes |
 |---|---|---|
+| **1.9.0** | 18 | **Long-term memory + context compression.** (1) New `memory` command and `MEMORY.md` — cross-session memory stored in the app's private directory (changing the workspace does not lose it), injected into the system prompt on every turn. The AI may write to it itself, with explicit prompt rules about what deserves remembering; `memory forget <keyword>` removes entries, and Settings offers a full editor and a clear button. (2) **Context compression** — previously `buildApiMessages()` sent the entire history every turn, so long conversations inevitably hit the backend's length limit. It now uses a **rolling summary**: when the estimated context exceeds the budget, the oldest exchange pairs are summarised by the model and merged with the previous summary. Every message stays visible in the UI — only what the model sees is condensed. Splits are aligned to user-message boundaries, the summary is persisted with the conversation, and a failed compression degrades to dropping the oldest messages with an explanation. (3) Manual compression lives in the overflow menu, which also shows the current estimated token usage. (4) A single message exceeding 35% of the budget is truncated (only the copy sent to the model — the UI keeps the full text); reading a large log file triggers this. |
 | **1.8.0** | 17 | **Code execution + auto-generated system prompt.** (1) New `run` command — executes code in 30+ languages (Python / JavaScript / C++ / C / Java / Go / Rust / Shell / PHP / Ruby / Lua…). Android ships no language runtime, and Android 10+ blocks executing ELF binaries from writable directories (W^X), so execution runs remotely on Wandbox: code goes out, results come back, APK size unchanged, and C++/Rust/Go work even though they cannot be compiled locally. (2) **The system prompt is now generated** from a single source of truth (`ToolCatalog`) — command examples, the reference table and all rules are derived from it, so adding a command no longer requires editing the prompt by hand. (3) Code execution is **off by default** and must be enabled under Settings → Code execution, with an explicit warning that code is sent to wandbox.org. (4) Fixed a real Wandbox constraint: it names Java sources `prog.java`, so `public class Main` failed to compile — the top-level `public` modifier is now stripped before upload. (5) If you edit the prompt manually your version wins; "Restore default" returns to the generated one. | **Web fetch + HTTP request + jump-to-bottom button.** (1) New `webfetch` command — fetches the body of a given URL (reuses Tavily `/extract`, which returns Markdown that the app renders directly), accepts multiple URLs at once, truncates bodies past 12,000 chars with an explicit note. (2) New `http` command — sends **any** HTTP request (GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS) with custom headers and body, and shows status code plus response headers; meant for calling APIs rather than reading pages. The division of labour between the three network tools is spelled out in the system prompt (search to find, fetch to read, http to call). (3) **Mutating `http` requests (POST/PUT/PATCH/DELETE) require user confirmation**, and the dialog states exactly where the request will be sent. (4) A **persistent "jump to latest" button** in the bottom-right of the chat page, with reserved padding so it never covers messages. Also fixed three bugs found by testing: Okio's `readByteArray(n)` throws EOF when the stream is short (which broke every response under 256 KB), the truncation probe over-read by one byte on chunked transfers, and Tavily error bodies nest `detail` as an object so the error reason was being dropped. |
 | **1.7.0** | 16 | **Web fetch + HTTP request + jump-to-bottom button.** (1) New `webfetch` command — fetches the body of a given URL (reuses Tavily `/extract`, which returns Markdown that the app renders directly), accepts multiple URLs at once, truncates bodies past 12,000 chars with an explicit note. (2) New `http` command — sends **any** HTTP request (GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS) with custom headers and body, and shows status code plus response headers; meant for calling APIs rather than reading pages. The division of labour between the three network tools is spelled out in the system prompt (search to find, fetch to read, http to call). (3) **Mutating `http` requests (POST/PUT/PATCH/DELETE) require user confirmation**, and the dialog states exactly where the request will be sent. (4) A **persistent "jump to latest" button** in the bottom-right of the chat page, with reserved padding so it never covers messages. Also fixed three bugs found by testing: Okio's `readByteArray(n)` throws EOF when the stream is short (which broke every response under 256 KB), the truncation probe over-read by one byte on chunked transfers, and Tavily error bodies nest `detail` as an object so the error reason was being dropped. |
 | **1.6.8** | 15 | **Task list and image rendering fixes.** (1) **Task list checkboxes are now hand-drawn.** Previously rendered with the `☑` / `☐` characters — on most Android devices `☑` falls through to an emoji font and comes out as a bulky 3-D grey block while `☐` uses the text font as a thin outline, so a single list mixed two visual styles that never aligned to the text baseline. Now drawn on a Canvas as a rounded square plus a white tick, fixed at 16dp with proportional corner radius and stroke, so it looks identical everywhere. (2) **Fixed images not showing inside list items.** Only a paragraph that *was* an image and paragraphs with inline images actually rendered them; `- Image: ![x](url)` — an image inside a **list item** — went through inline rendering alone and degraded to a line of alt text, which looks like a broken image. List items and headings now render images too, and inline no longer appends alt text, so a successful load no longer produces a duplicated "alt text + image" pair. |
@@ -90,6 +91,7 @@ infinite loops).
 | `move <src> -> <dst>` | Move or rename |
 | `delete <path>` | Delete a file or directory |
 | `run <file or language>` | **Run code** in 30+ languages. File form reads a workspace file; language form runs inline code |
+| `memory <content>` | **Cross-session memory.** No argument = show all, `forget <keyword>` = delete. Independent of the workspace |
 
 **Aliases**: `ls`=`list`, `cp`=`copy`, `mv`=`move`, `rm`/`del`=`delete`, `md`=`mkdir`,
 `grep`/`find`=`search`, `stat`=`info`.
@@ -97,6 +99,7 @@ infinite loops).
 `webfetch` also accepts `web_fetch` / `fetch` / `urlfetch` / `geturl`;
 `http` also accepts `httprequest` / `http_request` / `curl` / `request`;
 `run` also accepts `exec` / `execute` / `runfile`.
+`memory` also accepts `remember` / `memo`.
 `copy` / `move` arguments may also be space-separated: `cp a.js b.js`.
 
 > ⚠️ `search` and `websearch` are **not the same thing**: the former searches file contents
@@ -340,6 +343,52 @@ Limits:
 - The sandbox is isolated: it cannot read other workspace files.
 - Command-line arguments are not supported (no argv channel).
 - Binary executables cannot run (W^X).
+
+## Long-term memory
+
+`MEMORY.md` lives in the app's private directory and is injected into **every** turn, so preferences and
+project conventions survive across sessions and workspace changes. It is stored privately rather than in the
+workspace on purpose: the workspace is a SAF directory the user can swap at any time, and without one there
+would be no memory at all.
+
+Both sides can write. The AI appends entries when you say "remember this", or when it judges something to be
+long-lived — the prompt constrains it to facts that will still be true next month, and requires it to tell you
+what it stored. `memory forget <keyword>` removes matching entries; you can also edit the file directly in
+Settings.
+
+The format is deliberately loose: only lines starting with `- ` or `* ` count as entries, and the date prefix
+is optional.
+
+| Limit | Value |
+|---|---|
+| File size | 20,000 chars |
+| Entries | 200 |
+| Injected | 8,000 chars (truncated beyond that) |
+
+Duplicate entries are rejected, case-insensitively.
+
+## Context compression
+
+Earlier versions sent the entire history on every request, so long conversations eventually hit the backend's
+length limit — and the tool-result messages make that happen fast, since one `read` of a few thousand lines is
+tens of thousands of tokens.
+
+Now a **rolling summary** handles it:
+
+- **Nothing is removed from the UI.** The summary is only the version sent to the model; scrolling up still
+  shows the full text.
+- **Splits follow user-message boundaries**, so no answer is ever separated from its question.
+- **The most recent messages stay verbatim** (default 6), because summaries lose detail.
+- **Incremental merging**: the previous summary plus the new batch become one new summary, so it never degrades
+  into a summary of a summary.
+- **Persisted with the conversation**, so reopening the app does not lose it.
+
+Token usage is estimated from characters (CJK ≈ 1 token/char, others ≈ 1 token per 4 chars) with a ±30% margin;
+the default budget of 32,000 leaves room for replies and tool output on a 64k-window model.
+
+Compression runs automatically before a turn when over budget, or manually from the overflow menu. If it fails
+(network, model hiccup) it degrades to dropping the oldest messages and says so, rather than leaving the
+conversation unusable. Oversized single messages are truncated separately — only the copy sent to the model.
 
 ## Scheduled tasks
 

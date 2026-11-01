@@ -67,6 +67,31 @@ object SystemPromptBuilder {
     }.trimEnd()
 
     /**
+     * 把长期记忆拼到系统提示词末尾。
+     *
+     * 刻意**不**做进 [build]：记忆是运行时的可变数据，而 [build] 的结果
+     * 会被缓存成「用户看到的那份提示词」。混在一起的话，设置页上显示的
+     * 会是一大段记忆正文，用户改都没法改。
+     *
+     * 记忆为空时原样返回 [base]，不增任何空小节 —— 没记忆的用户不该
+     * 在提示词里看到一段「长期记忆（空）」的空话。
+     */
+    fun withMemory(base: String, memory: String): String {
+        val trimmed = memory.trim()
+        if (trimmed.isEmpty()) return base
+        return buildString {
+            appendLine(base)
+            appendLine()
+            appendLine("## 长期记忆")
+            appendLine()
+            appendLine("以下是从之前对话里积累的长期记忆，**每一轮都会带上**。把它当作已知事实直接使用，不要再去问用户一遍相同的偏好或约定。")
+            appendLine("如果其中的内容与用户当前的说法冲突，**以当前说法为准**，并且用 `memory` 修正那条旧记忆。")
+            appendLine()
+            appendLine(trimmed)
+        }.trimEnd()
+    }
+
+    /**
      * 把示例正文包进 phoclaw 围栏。
      *
      * 示例的**第一行是参数行**，必须跟在动作名后面（`phoclaw:write src/a.js`），

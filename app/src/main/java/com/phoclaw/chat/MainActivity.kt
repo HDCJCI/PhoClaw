@@ -170,7 +170,8 @@ private fun AppRoot(pendingConversationId: String? = null) {
                 } else {
                     ChatScreen(
                         vm = vm,
-                        onOpenHistory = { chatOverlay = ChatOverlay.HISTORY }
+                        onOpenHistory = { chatOverlay = ChatOverlay.HISTORY },
+                        onOpenSettings = { tab = Tab.SETTINGS }
                     )
                 }
 

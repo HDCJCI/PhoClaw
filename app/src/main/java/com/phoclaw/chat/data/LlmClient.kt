@@ -140,6 +140,41 @@ class LlmClient {
         awaitClose { call.cancel() }
     }.flowOn(Dispatchers.IO)
 
+    /**
+     * 非流式补全，用于「测试连接」与**上下文压缩**。
+     *
+     * 压缩不需要一边生成一边显示，反而是非流式更合适：拿到完整摘要才能
+     * 决定要不要落盘。
+     *
+     * @param maxTokens 不传则不下发这个字段 —— 部分国产网关对未知字段敏感，
+     *   没必要的话就别多塞一个
+     */
+    suspend fun complete(
+        baseUrl: String,
+        apiKey: String,
+        model: String,
+        messages: List<ChatMessage>,
+        temperature: Double = 0.3,
+        maxTokens: Int? = null
+    ): Result<String> = withContext(Dispatchers.IO) {
+        runCatching {
+            val url = "${baseUrl.trimEnd('/')}/v1/chat/completions"
+            val payload = buildPayload(
+                model, messages, stream = false,
+                temperature = temperature, maxTokens = maxTokens
+            )
+            client.newCall(buildRequest(url, apiKey, payload)).execute().use { resp ->
+                val body = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) {
+                    throw IOException("HTTP ${resp.code} ${resp.message}${formatError(body)}")
+                }
+                JSONObject(body)
+                    .optJSONArray("choices")?.optJSONObject(0)
+                    ?.optJSONObject("message")?.optString("content").orEmpty()
+            }
+        }
+    }
+
     /** 非流式调用，用于「测试连接」。 */
     suspend fun ping(
         baseUrl: String,
@@ -180,7 +215,8 @@ class LlmClient {
         model: String,
         messages: List<ChatMessage>,
         stream: Boolean,
-        temperature: Double
+        temperature: Double,
+        maxTokens: Int? = null
     ): String {
         val array = JSONArray()
         messages.forEach { msg ->
@@ -200,6 +236,9 @@ class LlmClient {
             put("messages", array)
             put("stream", stream)
             put("temperature", temperature)
+            // 仅在有明确需求时下发。有些网关遇到不认识的字段会直接 400，
+            // 能少一个是一个
+            if (maxTokens != null) put("max_tokens", maxTokens)
         }.toString()
     }
 

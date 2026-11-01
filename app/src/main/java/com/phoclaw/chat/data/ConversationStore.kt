@@ -21,7 +21,17 @@ data class StoredConversation(
     val id: String,
     val title: String,
     val updatedAt: Long,
-    val messages: List<StoredMessage>
+    val messages: List<StoredMessage>,
+    /**
+     * 早期消息的滚动摘要。
+     *
+     * 与 [messages] 是**并存**关系：界面上仍然显示全部原文，只是发给模型时
+     * 用「摘要 + 第 summarizedCount 条之后的消息」代替前面那一大段。
+     * 用户往上翻能看到全文，模型拿到的是浓缩版。
+     */
+    val summary: String = "",
+    /** 摘要已覆盖的消息条数。0 表示没压缩过。 */
+    val summarizedCount: Int = 0
 )
 
 /**
@@ -188,6 +198,11 @@ class ConversationStore(context: Context) {
             put("title", conversation.title)
             put("updatedAt", conversation.updatedAt)
             put("messages", messages)
+            // 旧版本读到这里会忽略多出来的字段，不需要版本号
+            if (conversation.summary.isNotBlank()) put("summary", conversation.summary)
+            if (conversation.summarizedCount > 0) {
+                put("summarizedCount", conversation.summarizedCount)
+            }
         }.toString()
     }
 
@@ -213,7 +228,12 @@ class ConversationStore(context: Context) {
             id = json.optString("id"),
             title = json.optString("title"),
             updatedAt = json.optLong("updatedAt"),
-            messages = messages
+            messages = messages,
+            summary = json.optString("summary"),
+            // 越界保护：消息被删过而摘要计数没跟上时，宁可把整段摘要作废，
+            // 也不要因为 drop(n) 越界让整个会话读不出来
+            summarizedCount = json.optInt("summarizedCount", 0)
+                .coerceIn(0, messages.size)
         )
     }
 

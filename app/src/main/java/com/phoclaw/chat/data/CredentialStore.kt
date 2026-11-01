@@ -110,6 +110,47 @@ class CredentialStore(context: Context) {
         get() = prefs.getBoolean(KEY_CODE_EXEC, false)
         set(value) = prefs.edit().putBoolean(KEY_CODE_EXEC, value).apply()
 
+    /**
+     * 是否把 `MEMORY.md` 注入每一轮的 system 消息。
+     *
+     * 默认开启：长期记忆的价值就在于「不用用户重复交代」。关掉只是不再
+     * **读取**，文件内容原样保留，随时能再打开。
+     */
+    var memoryEnabled: Boolean
+        get() = prefs.getBoolean(KEY_MEMORY_ENABLED, true)
+        set(value) = prefs.edit().putBoolean(KEY_MEMORY_ENABLED, value).apply()
+
+    /**
+     * 是否在超预算时自动压缩早期对话。
+     *
+     * 默认开启。关掉之后长对话最终会撞上后端的长度上限并报错 ——
+     * 那是用户自己的选择，不做二次确认。
+     */
+    var autoCompress: Boolean
+        get() = prefs.getBoolean(KEY_AUTO_COMPRESS, true)
+        set(value) = prefs.edit().putBoolean(KEY_AUTO_COMPRESS, value).apply()
+
+    /**
+     * 上下文预算（token）。
+     *
+     * 默认 32000：主流模型窗口多在 64k~128k，取一半是给回复和工具结果
+     * 留余量。估算本身有 ±30% 误差，压得太紧反而会把有用的近况压掉。
+     */
+    var contextBudget: Int
+        get() = prefs.getInt(KEY_CONTEXT_BUDGET, DEFAULT_CONTEXT_BUDGET)
+            .coerceIn(MIN_CONTEXT_BUDGET, MAX_CONTEXT_BUDGET)
+        set(value) = prefs.edit()
+            .putInt(KEY_CONTEXT_BUDGET, value.coerceIn(MIN_CONTEXT_BUDGET, MAX_CONTEXT_BUDGET))
+            .apply()
+
+    /** 压缩时末尾保留多少条原文。必须是偶数才凑得成问答对，设置页会取整。 */
+    var keepRecent: Int
+        get() = prefs.getInt(KEY_KEEP_RECENT, DEFAULT_KEEP_RECENT)
+            .coerceIn(MIN_KEEP_RECENT, MAX_KEEP_RECENT)
+        set(value) = prefs.edit()
+            .putInt(KEY_KEEP_RECENT, value.coerceIn(MIN_KEEP_RECENT, MAX_KEEP_RECENT))
+            .apply()
+
     val isConfigured: Boolean get() = apiKey.isNotBlank()
 
     companion object {
@@ -122,8 +163,20 @@ class CredentialStore(context: Context) {
         private const val KEY_VISION = "model_supports_vision"
         private const val KEY_TAVILY = "tavily_api_key"
         private const val KEY_CODE_EXEC = "code_exec_enabled"
+        private const val KEY_MEMORY_ENABLED = "memory_enabled"
+        private const val KEY_AUTO_COMPRESS = "auto_compress"
+        private const val KEY_CONTEXT_BUDGET = "context_budget"
+        private const val KEY_KEEP_RECENT = "keep_recent"
 
         const val DEFAULT_BASE_URL = "https://api.deepseek.com"
         const val DEFAULT_MODEL = "deepseek-chat"
+
+        const val DEFAULT_CONTEXT_BUDGET = 32_000
+        const val MIN_CONTEXT_BUDGET = 4_000
+        const val MAX_CONTEXT_BUDGET = 500_000
+
+        const val DEFAULT_KEEP_RECENT = 6
+        const val MIN_KEEP_RECENT = 2
+        const val MAX_KEEP_RECENT = 40
     }
 }
