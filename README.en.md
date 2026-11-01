@@ -2,11 +2,9 @@
 
 An Android app that runs on your phone, holds a conversation, and reads/writes files in your workspace directly.(Just software made out of boredom)
 
-**Current version: v1.7.0** (versionCode 16)
 
 [中文文档](README.md) · **English**
 
-> Named after **OpenClaw** (the space lobster that grows by shedding its shell 🦞).
 > This is an independent implementation; the icon is taken from OpenClaw's official assets.
 >
 > It contains **no hardware connectivity, no Bluetooth/Wi-Fi provisioning, no component
