@@ -16,6 +16,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -44,25 +45,62 @@ import com.phoclaw.chat.util.MarkdownParser
 import com.phoclaw.chat.util.MarkdownParser.Block
 import com.phoclaw.chat.util.MarkdownParser.Span
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 
 /**
  * 把 Markdown 文本渲染成 Compose 组件。
  *
  * 针对聊天气泡做了尺寸适配：字号偏小、间距紧凑、代码块横向可滚动。
+ *
+ * @param streaming 内容仍在流式追加。开启后按约 11fps 采样后解析，
+ *   而不是每来一个 token 就全量重排一遍 —— 解析是 O(n) 正则扫描，
+ *   5000 字的回答按 token 频率（20~50/s）跑会把主线程吃满。
+ *   采样间隔 90ms 在观感上仍是连续打字，但 CPU 占用降了一个数量级。
  */
 @Composable
 fun MarkdownText(
     markdown: String,
     modifier: Modifier = Modifier,
-    fontSize: androidx.compose.ui.unit.TextUnit = 14.sp
+    fontSize: androidx.compose.ui.unit.TextUnit = 14.sp,
+    streaming: Boolean = false
 ) {
-    val parsed = remember(markdown) { MarkdownParser.parseWithRefs(markdown) }
+    val text = rememberStreamedText(markdown, streaming)
+    val parsed = remember(text) { MarkdownParser.parseWithRefs(text) }
 
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
         parsed.blocks.forEach { block -> BlockView(block, parsed.refs, fontSize) }
     }
 }
+
+/**
+ * 流式文本的节流采样。
+ *
+ * 用「固定间隔推一次最新值」而不是「变化后等 90ms」：后者在 token 间隔
+ * 小于 90ms 时会被无限推迟（每次新 token 都重置计时器），表现成攒一大段
+ * 再突然吐出来，反而比不节流更跳。
+ */
+@Composable
+private fun rememberStreamedText(text: String, streaming: Boolean): String {
+    var shown by remember { mutableStateOf(text) }
+    val latest by rememberUpdatedState(text)
+
+    LaunchedEffect(streaming) {
+        shown = latest
+        if (!streaming) return@LaunchedEffect
+        while (isActive) {
+            delay(STREAM_SAMPLE_MS)
+            if (shown != latest) shown = latest
+        }
+    }
+
+    // 结束时直接用最新值，不必等下一个采样周期
+    return if (streaming) shown else text
+}
+
+/** 流式采样间隔。90ms ≈ 11fps，肉眼看着是连续的，解析次数少一个数量级。 */
+private const val STREAM_SAMPLE_MS = 90L
 
 @Composable
 private fun BlockView(

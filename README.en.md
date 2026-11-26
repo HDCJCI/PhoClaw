@@ -2,7 +2,7 @@
 
 An Android app that runs on your phone, holds a conversation, and reads/writes files in your workspace directly.(Just software made out of boredom)
 
-**Current version: v1.11.2** (versionCode 22)
+**Current version: v1.11.3** (versionCode 23)
 
 [中文文档](README.md) · **English** · [Changelog](CHANGELOG.md) · [Downloads](https://github.com/HDCJCI/PhoClaw/releases)
 
@@ -16,14 +16,14 @@ An Android app that runs on your phone, holds a conversation, and reads/writes f
 
 ## Version history
 
-Only the last three versions are listed here. The full record — 22 versions, split into
+Only the last three versions are listed here. The full record — 23 versions, split into
 Added / Fixed / Changed — lives in **[CHANGELOG.md](CHANGELOG.md)** (Chinese).
 
 | Version | versionCode | Changes |
 |---|---|---|
-| **1.11.2** | 22 | **Cleartext HTTP and readable network errors.** `usesCleartextTraffic` replaced by a network security config, so LAN backends like `http://192.168.x.x:8080` can finally connect (trust anchors still system-only, so an installed packet-sniffing CA can't read your key); `ConnectException` is translated instead of dumped raw — loopback addresses say outright that 127.0.0.1 means the phone itself, LAN addresses list the three things to check; bare hosts get `http://` for private ranges and `https://` for public ones |
+| **1.11.3** | 23 | **Streaming Markdown.** Headings, lists, code blocks and tables are rendered while the answer is still being written, sampled every 90ms instead of reflowing on every token (0.83ms per parse at 3,500 chars). Also fixes three scrolling bugs: long answers no longer get yanked back to their first line, the scroll index no longer goes wrong when a compression notice is present, and scrolling no longer restarts an animation per token. Scrolling up pauses auto-follow; sending a message resumes it |
+| 1.11.2 | 22 | **Cleartext HTTP and readable network errors.** `usesCleartextTraffic` replaced by a network security config, so LAN backends like `http://192.168.x.x:8080` can finally connect (trust anchors still system-only, so an installed packet-sniffing CA can't read your key); `ConnectException` is translated instead of dumped raw — loopback addresses say outright that 127.0.0.1 means the phone itself, LAN addresses list the three things to check; bare hosts get `http://` for private ranges and `https://` for public ones |
 | 1.11.1 | 21 | **Custom prompts no longer freeze the tool section.** Only the user's own part (role, tone, conventions) is stored; the tool list, examples and rules are regenerated on every request and appended at the end, so adding a command never forces you to re-paste the docs. Existing custom prompts are split at `## 指令格式` on first read, keeping just the part you actually wrote |
-| 1.11.0 | 20 | **Settings split into a two-level menu.** The home screen keeps six entries (workspace card, then model & connection / context compression / system prompt / tools & permissions / long-term memory / about), each with a one-line status summary — the current backend, which tools are on — so you don't have to open a sub-page to check. Save moved to a pinned bottom bar; the model and memory pages flush on exit so switching pages no longer drops a half-typed key. New "About → where your data goes" list |
 
 ## What it is
 
@@ -152,9 +152,9 @@ try another approach — rather than waiting forever on a dialog no one will eve
 | `---` | Horizontal rule |
 | `[text](url)` | Underlined text in the accent color |
 
-> **Markdown is not rendered while streaming**: output is shown as plain text while the AI
-> is generating and rendered once the whole reply finishes. Otherwise unclosed ` ``` ` would
-> make the layout jump around mid-stream.
+> **Markdown is rendered while streaming too**: the layout is sampled every 90ms as the answer
+> is written. A code block is styled before its closing fence arrives (the parser treats an
+> unclosed fence as running to the end), so nothing jumps when it closes.
 
 ---
 

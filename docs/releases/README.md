@@ -5,8 +5,8 @@
 ```
 docs/releases/
 ├── README.md      ← 你正在看的这份：索引 + 发布流程
-├── v1.11.2.md     ← tag v1.11.2 的 Release 正文，整段粘进 GitHub 即可
-├── v1.11.1.md     ← 上一版
+├── v1.11.3.md     ← tag v1.11.3 的 Release 正文，整段粘进 GitHub 即可
+├── v1.11.2.md     ← 上一版
 └── v1.9.0.md      ← 再上一版
 ```
 
@@ -14,8 +14,8 @@ docs/releases/
 
 | 文件 | 给谁看 | 写什么 |
 |---|---|---|
-| `CHANGELOG.md` | 想查「哪一版改了什么」的人 | 全部 21 个版本，按新增 / 修复 / 变更分类，一条不落 |
-| `docs/releases/v1.11.2.md` | 打开 Releases 页面的访客 | 只讲**这一版**：亮点、升级注意、已知限制、校验值 |
+| `CHANGELOG.md` | 想查「哪一版改了什么」的人 | 全部 22 个版本，按新增 / 修复 / 变更分类，一条不落 |
+| `docs/releases/v1.11.3.md` | 打开 Releases 页面的访客 | 只讲**这一版**：亮点、升级注意、已知限制、校验值 |
 
 Release 正文不复述完整变更列表 —— 那是 CHANGELOG 的活。它回答的是「我该不该升、升了会怎样」。
 
@@ -23,17 +23,17 @@ Release 正文不复述完整变更列表 —— 那是 CHANGELOG 的活。它�
 
 ## 当前版本
 
-**v1.11.2** · 2026-11-26 · versionCode 22
+**v1.11.3** · 2026-11-26 · versionCode 23
 
-> 放开明文 HTTP，让局域网自建后端能连；网络报错从英文原文换成可操作的中文。
+> 流式生成时就开始渲染 Markdown（90ms 采样），并修好流式滚动的三处问题。
 
 | 项 | 值 |
 |---|---|
-| 正文 | [`v1.11.2.md`](v1.11.2.md) |
-| 附件 | `PhoClaw-v1.11.2-debug.apk` |
-| 大小 | 19,395,412 字节（18.5 MiB） |
-| MD5 | `267b1fdf3b0347f881d755e2e6964ffc` |
-| SHA-256 | `986c7fd2ec38ee265ad5ed4d14b64125e18c6a5587b63d19aeabc0b97bc1b687` |
+| 正文 | [`v1.11.3.md`](v1.11.3.md) |
+| 附件 | `PhoClaw-v1.11.3-debug.apk` |
+| 大小 | 19,395,404 字节（18.5 MiB） |
+| MD5 | `a6c0514344dfc27c9273cd2813b4435f` |
+| SHA-256 | `7c02261d37f621b5f1df5150b4927a115f85b281244d90daf0058d5b6e04bd14` |
 
 ---
 
@@ -41,7 +41,8 @@ Release 正文不复述完整变更列表 —— 那是 CHANGELOG 的活。它�
 
 | 版本 | 日期 | 主题 | versionCode | 正文 |
 |---|---|---|---|---|
-| **1.11.2** | 2026-11-26 | 明文 HTTP + 报错人话化 | 22 | [v1.11.2.md](v1.11.2.md) |
+| **1.11.3** | 2026-11-26 | 流式 Markdown + 滚动修正 | 23 | [v1.11.3.md](v1.11.3.md) |
+| 1.11.2 | 2026-11-26 | 明文 HTTP + 报错人话化 | 22 | [v1.11.2.md](v1.11.2.md) |
 | 1.11.1 | 2026-11-26 | 提示词改为「自定义 + 自动追加」 | 21 | [v1.11.1.md](v1.11.1.md) |
 | 1.11.0 | 2026-11-26 | 设置页改为二级菜单 | 20 | [v1.11.0.md](v1.11.0.md) |
 | 1.10.0 | 2026-11-26 | 模型档案 + 思考显示 + 本机命令 | 19 | [v1.10.0.md](v1.10.0.md) |
@@ -75,8 +76,8 @@ Release 正文不复述完整变更列表 —— 那是 CHANGELOG 的活。它�
 `app/build.gradle.kts`：
 
 ```kotlin
-versionCode = 23          // 只增不减
-versionName = "1.11.3"
+versionCode = 24          // 只增不减
+versionName = "1.11.4"
 ```
 
 ### 2. 编译并核对
@@ -86,19 +87,19 @@ versionName = "1.11.3"
 aapt2 dump badging app/build/outputs/apk/debug/app-debug.apk | head -2
 ```
 
-必须看到 `versionCode='23' versionName='1.11.3'` 再往下走。版本号没改对就打包，是最常见的低级错误。
+必须看到 `versionCode='24' versionName='1.11.4'` 再往下走。版本号没改对就打包，是最常见的低级错误。
 
 ### 3. 改名并算校验值
 
 ```bash
-cp app/build/outputs/apk/debug/app-debug.apk ../PhoClaw-v1.11.3-debug.apk
-md5sum    ../PhoClaw-v1.11.3-debug.apk
-sha256sum ../PhoClaw-v1.11.3-debug.apk
+cp app/build/outputs/apk/debug/app-debug.apk ../PhoClaw-v1.11.4-debug.apk
+md5sum    ../PhoClaw-v1.11.4-debug.apk
+sha256sum ../PhoClaw-v1.11.4-debug.apk
 ```
 
 ### 4. 写正文
 
-新建 `docs/releases/v1.11.3.md`，结构照 `v1.11.2.md`：
+新建 `docs/releases/v1.11.4.md`，结构照 `v1.11.3.md`：
 
 > 一句话摘要 → 亮点（讲清**为什么这么设计**）→ 修了什么 → 安装说明 → 已知限制 → 校验值
 
@@ -109,12 +110,12 @@ sha256sum ../PhoClaw-v1.11.3-debug.apk
 ### 6. 打 tag 并建 Release
 
 ```bash
-git tag -a v1.11.3 -m "v1.11.3"
+git tag -a v1.11.4 -m "v1.11.4"
 git push origin main --tags
 ```
 
-然后在 GitHub 上 **Draft a new release**：选 tag → 标题 `v1.11.3 — 主题` →
-正文粘贴 `v1.11.3.md` 全文 → 附件上传 APK → 发布。
+然后在 GitHub 上 **Draft a new release**：选 tag → 标题 `v1.11.4 — 主题` →
+正文粘贴 `v1.11.4.md` 全文 → 附件上传 APK → 发布。
 
 ### 7. 同步 `CHANGELOG.md`
 
@@ -128,7 +129,7 @@ git push origin main --tags
 
 | 位置 | 什么时候动 |
 |---|---|
-| patch（1.11.**2** → 1.11.**3**） | 修 bug、小调整 |
+| patch（1.11.**3** → 1.11.**4**） | 修 bug、小调整 |
 | minor（1.**11**.0 → 1.**12**.0） | 新增能力，但老用法不变 |
 | major（**1**.11.0 → **2**.0.0） | 破坏性变更（改了指令格式、删了功能） |
 
@@ -148,9 +149,9 @@ git push origin main --tags
 
 ```json
 {
-  "version": "1.11.2",
+  "version": "1.11.3",
   "file": "app.apk",
-  "label": "PhoClaw-v1.11.2-debug.apk",
+  "label": "PhoClaw-v1.11.3-debug.apk",
   "notes": "一句话说明"
 }
 ```

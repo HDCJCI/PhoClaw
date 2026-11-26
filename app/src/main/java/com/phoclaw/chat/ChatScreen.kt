@@ -35,10 +35,12 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.phoclaw.chat.data.ChatMessage
 import com.phoclaw.chat.data.ModelProfile
 import com.phoclaw.chat.data.PendingAttachment
 import com.phoclaw.chat.ui.MarkdownText
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.sample
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -79,15 +81,57 @@ fun ChatScreen(
 
     LaunchedEffect(Unit) { vm.refreshWorkspaceState() }
 
-    LaunchedEffect(
-        state.messages.size,
-        state.messages.lastOrNull()?.text,
-        // 纯图片消息的 text 是空的，不加这个依赖就不会触发滚动
-        state.messages.lastOrNull()?.attachments?.size
-    ) {
-        if (state.messages.isNotEmpty()) {
-            listState.animateScrollToItem(state.messages.lastIndex)
+    /*
+     * 跟随最新消息。
+     *
+     * 三处限制，缺一个体验都会崩：
+     *
+     * 1. autoFollow —— 用户往上翻时不跟随。否则流式期间每 120ms 把视图拽回
+     *    底部，想回看上一句都做不到。
+     * 2. sample(120) —— 流式文本每几十毫秒变一次，逐次滚动会把主线程的
+     *    Layout 阶段排满，而且旧实现每个 token 都 animateScrollToItem，
+     *    新动画不断打断旧动画，看起来像抽搐。
+     * 3. 滚到末尾的哨兵 item，而不是最后一条消息。scrollToItem(最后一条) 是把
+     *    这条消息的**顶部**对齐视口顶部，而流式中的回答往往比屏幕还高 ——
+     *    结果每追加一段就把视图拽回这条消息的开头，用户永远看不到正在写的那一行。
+     */
+    var autoFollow by remember { mutableStateOf(true) }
+
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress to listState.lastScrolledBackward }
+            .collect { (scrolling, backward) ->
+                // 只认用户自己的滚动方向。程序调用 scrollToItem 也会让
+                // isScrollInProgress 为 true，但方向是向下的，正好保持跟随
+                if (scrolling) autoFollow = !backward
+            }
+    }
+
+    // 自己发消息时恢复跟随：发出去就是为了看回复，没有理由停在上文
+    LaunchedEffect(state.messages.size) {
+        if (state.messages.lastOrNull()?.role == ChatMessage.ROLE_USER) autoFollow = true
+    }
+
+    fun bottomItemIndex(): Int =
+        (if (state.messages.isEmpty()) 1 else 0) +
+                (if (state.summarizedCount > 0) 1 else 0) +
+                state.messages.size
+
+    LaunchedEffect(Unit) {
+        snapshotFlow {
+            val last = state.messages.lastOrNull()
+            // 长度做信号就够：内容只会追加，长度不变则布局不会变
+            state.messages.size to (last?.text?.length ?: 0)
         }
+            .sample(120)
+            .collect {
+                if (state.messages.isEmpty() || !autoFollow) return@collect
+                if (state.isStreaming) {
+                    // 流式：无动画，120ms 一次动画会互相打断
+                    listState.scrollToItem(bottomItemIndex())
+                } else {
+                    listState.animateScrollToItem(bottomItemIndex())
+                }
+            }
     }
 
     LaunchedEffect(state.banner) {
@@ -108,7 +152,9 @@ fun ChatScreen(
     val imeVisible = WindowInsets.Companion.isImeVisible
     LaunchedEffect(imeVisible) {
         if (imeVisible && state.messages.isNotEmpty()) {
-            listState.animateScrollToItem(state.messages.lastIndex)
+            // 指到末尾哨兵，而不是最后一条消息的顶部：键盘弹起时用户要看的是
+            // 「最近聊到哪了」，长回答的最后一行才是这句话
+            listState.animateScrollToItem(bottomItemIndex())
         }
     }
 
@@ -311,6 +357,20 @@ fun ChatScreen(
                         }
                         MessageBubble(msg, attachmentFile = vm::attachmentFile)
                     }
+
+                    /*
+                     * 末尾哨兵。
+                     *
+                     * 「滚到底」需要一个能落在内容末尾的目标。直接滚到最后一条
+                     * 消息只会把它的顶部对齐视口顶部 —— 对超出一屏的流式回答来说，
+                     * 等于每次都把视图拉回开头。
+                     *
+                     * 滚到这条 1dp 的哨兵时，LazyColumn 不能滚过内容末尾，会自然
+                     * clamp 到底部，短消息和长消息都能正确落位。
+                     */
+                    item(key = "chat-bottom-anchor") {
+                        Spacer(Modifier.height(1.dp))
+                    }
                 }
 
                 /*
@@ -326,10 +386,12 @@ fun ChatScreen(
                     val scope = rememberCoroutineScope()
                     SmallFloatingActionButton(
                         onClick = {
+                            // 点了就说明想看最新内容，恢复跟随
+                            autoFollow = true
                             scope.launch {
                                 // 用 animate 而不是 snap：消息多时瞬间跳转会让人
                                 // 失去方位感，平滑滚动能看清中间掠过了什么
-                                listState.animateScrollToItem(state.messages.lastIndex)
+                                listState.animateScrollToItem(bottomItemIndex())
                             }
                         },
                         modifier = Modifier
@@ -697,10 +759,9 @@ private fun MessageBubble(msg: UiMessage, attachmentFile: (String) -> File) {
 
                     if (msg.text.isNotBlank()) {
                         if (msg.attachments.isNotEmpty()) Spacer(Modifier.height(7.dp))
-                        if (isUser || isError || msg.isStreaming) {
-                            // 用户输入、错误信息、以及流式生成中的内容都按纯文本显示。
-                            // 流式期间 Markdown 语法尚未闭合（如代码块缺少结尾的 ```），
-                            // 提前渲染会导致排版反复跳动，等生成完毕再渲染。
+                        if (isUser || isError) {
+                            // 用户输入与错误信息按纯文本显示：前者是原始输入，
+                            // 后者是程序生成的多行说明，都不该被当成 Markdown
                             Text(
                                 text = msg.text,
                                 fontSize = 14.sp,
@@ -708,7 +769,14 @@ private fun MessageBubble(msg: UiMessage, attachmentFile: (String) -> File) {
                                 else FontFamily.Default
                             )
                         } else {
-                            MarkdownText(markdown = msg.text, fontSize = 14.sp)
+                            // 流式期间也走 Markdown，只是内部按 90ms 采样。
+                            // 之前这里整段用纯文本，代价是几千字的回答写完后
+                            // 才「啪」地变成排版好的样子 —— 前面读的全是带 ** 和 | 的原文
+                            MarkdownText(
+                                markdown = msg.text,
+                                fontSize = 14.sp,
+                                streaming = msg.isStreaming
+                            )
                         }
                     }
                 }
