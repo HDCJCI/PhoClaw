@@ -1,156 +1,424 @@
 package com.phoclaw.chat
 
-import android.content.Intent
-import android.net.Uri
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.phoclaw.chat.data.CredentialStore
 import com.phoclaw.chat.data.DeviceEnv
-import com.phoclaw.chat.data.MemoryStore
-import com.phoclaw.chat.data.ModelProfile
-import com.phoclaw.chat.util.BaseUrlHint
-import kotlinx.coroutines.launch
+
+/**
+ * 设置页的一级 / 二级页面。
+ *
+ * 顺序（ordinal）同时决定切换动画的方向：进入 ordinal 更大的页面从右滑入，
+ * 返回时从左滑入。所以枚举的声明顺序就是导航的层级顺序，不要随意调整。
+ */
+internal enum class SettingsPage(val title: String) {
+    HOME("设置"),
+    MODEL("模型与连接"),
+    CONTEXT("上下文压缩"),
+    PROMPT("系统提示词"),
+    TOOLS("工具与权限"),
+    MEMORY("长期记忆"),
+    ABOUT("关于")
+}
+
+/**
+ * 设置页。
+ *
+ * ## 为什么要分二级
+ *
+ * 1.9.0 之前所有设置都堆在一个 [Column] 里纵向滚动，到 1.10.0 已经有 8 个区块、
+ * 近千行组合代码。问题不是「长」（手机屏幕本来就只能一屏），而是**找不到**：
+ * 用户想关掉代码执行，得先划过工作区、一整屏模型参数、联网搜索，才看到那个开关。
+ * 而且每加一个功能，所有东西都往下沉一截。
+ *
+ * 现在首页只留「目录」：一项一行，标题 + 当前状态摘要。摘要是有信息量的
+ * （当前用哪个模型、开了几个工具、记忆多少条），不进二级页也能知道系统状态。
+ *
+ * ## 状态为什么在子页里，而不是全提到这一层
+ *
+ * 提到顶层意味着 30 多个参数往下传，改一个字段要动三处。子页自持状态后
+ * 每个页面是封闭的，代价是**切页会丢草稿** —— 这个用 onDispose 自动落盘补上了
+ * （见 ModelPage / MemoryPage）。
+ *
+ * 反过来，凡是真正的持久化设置都走 [com.phoclaw.chat.data.CredentialStore]，
+ * 所以切页丢掉的是「还没保存的输入」，不是「已保存的配置」。
+ */
+@Composable
+fun SettingsScreen(vm: MainViewModel) {
+    // 用 name 而不是枚举本身存：Bundle 对 Serializable 的支持依赖 ROM，
+    // 字符串是绝对安全的
+    var pageId by rememberSaveable { mutableStateOf(SettingsPage.HOME.name) }
+    val page = SettingsPage.entries.firstOrNull { it.name == pageId } ?: SettingsPage.HOME
+
+    val snackbarHost = remember { SnackbarHostState() }
+    // 这个 scope 的生命周期是整个设置页，不是单个子页 —— 子页 onDispose
+    // 里发起的写盘要活过子页本身，否则协程刚启动就被取消
+    val scope = rememberCoroutineScope()
+
+    BackHandler(enabled = page != SettingsPage.HOME) { pageId = SettingsPage.HOME.name }
+
+    AnimatedContent(
+        targetState = page,
+        transitionSpec = {
+            val forward = targetState.ordinal > initialState.ordinal
+            val sign = if (forward) 1 else -1
+            (slideInHorizontally { sign * it / 6 } + fadeIn()) togetherWith
+                    (slideOutHorizontally { -sign * it / 6 } + fadeOut())
+        },
+        label = "settings-page"
+    ) { current ->
+        val back: () -> Unit = { pageId = SettingsPage.HOME.name }
+        when (current) {
+            SettingsPage.HOME -> SettingsHome(
+                vm = vm,
+                snackbarHost = snackbarHost,
+                onOpen = { pageId = it.name }
+            )
+
+            SettingsPage.MODEL -> ModelSettingsPage(vm, snackbarHost, scope, back)
+            SettingsPage.CONTEXT -> ContextSettingsPage(vm, snackbarHost, back)
+            SettingsPage.PROMPT -> PromptSettingsPage(vm, snackbarHost, back)
+            SettingsPage.TOOLS -> ToolSettingsPage(vm, snackbarHost, scope, back)
+            SettingsPage.MEMORY -> MemorySettingsPage(vm, snackbarHost, scope, back)
+            SettingsPage.ABOUT -> AboutSettingsPage(back)
+        }
+    }
+}
+
+// ------------------------------------------------------------------ 首页目录
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(
-    vm: MainViewModel
+private fun SettingsHome(
+    vm: MainViewModel,
+    snackbarHost: SnackbarHostState,
+    onOpen: (SettingsPage) -> Unit
 ) {
     val store = vm.credentialStore
-    val scope = rememberCoroutineScope()
-    val context = LocalContext.current
-    val snackbarHost = remember { SnackbarHostState() }
-
-    /*
-     * 模型档案。
-     *
-     * 编辑的永远是「当前选中的那一份」，所以所有输入框的 state 都用当前
-     * 档案的 id 当 remember 的 key —— 切换档案时它们会自动重新载入，
-     * 不需要手写一遍「切换后重置全部字段」，那种代码漏一个就会串数据。
-     */
+    val state by vm.state.collectAsState()
     val profileList by vm.profiles.collectAsState()
     val activeId by vm.activeProfileId.collectAsState()
     val current = profileList.firstOrNull { it.id == activeId } ?: profileList.firstOrNull()
 
-    var profileName by remember(current?.id) { mutableStateOf(current?.name.orEmpty()) }
-    var apiKey by remember(current?.id) { mutableStateOf(current?.apiKey.orEmpty()) }
-    var baseUrl by remember(current?.id) { mutableStateOf(current?.baseUrl.orEmpty()) }
-    var model by remember(current?.id) { mutableStateOf(current?.model.orEmpty()) }
-    var modelSupportsVision by remember(current?.id) {
-        mutableStateOf(current?.supportsVision ?: false)
-    }
-    var showReasoning by remember(current?.id) { mutableStateOf(current?.showReasoning ?: true) }
-    var temperatureText by remember(current?.id) {
-        mutableStateOf((current?.temperature ?: ModelProfile.DEFAULT_TEMPERATURE).toString())
-    }
-
-    var profileMenuOpen by remember { mutableStateOf(false) }
-    var confirmDeleteProfile by remember { mutableStateOf(false) }
-
-    var systemPrompt by remember { mutableStateOf(store.systemPrompt) }
-    var showKey by remember { mutableStateOf(false) }
-    var testing by remember { mutableStateOf(false) }
-
-    /**
-     * 把编辑框里的内容写回当前档案。
-     *
-     * 地址会被 [BaseUrlHint.normalize] 清洗，所以必须用返回值回显 ——
-     * 否则用户看到的是自己填的 `/v1/chat/completions`，实际生效的却是
-     * 清洗后的域名，下次进来又变一个样。
-     */
-    fun saveDraft(): ModelProfile? {
-        val base = current ?: return null
-        return vm.saveProfile(
-            base.copy(
-                name = profileName.trim(),
-                baseUrl = baseUrl,
-                apiKey = apiKey,
-                model = model,
-                supportsVision = modelSupportsVision,
-                showReasoning = showReasoning,
-                temperature = temperatureText.toDoubleOrNull() ?: base.temperature
-            )
-        )
-    }
-
-    // 联网搜索
-    var tavilyKey by remember { mutableStateOf(store.tavilyKey) }
-    var showTavily by remember { mutableStateOf(false) }
-    var testingSearch by remember { mutableStateOf(false) }
-
-    // 代码执行（默认关闭）
-    var codeExecEnabled by remember { mutableStateOf(store.codeExecEnabled) }
-
-    // 长期记忆
-    var memoryEnabled by remember { mutableStateOf(store.memoryEnabled) }
-    var memoryText by remember { mutableStateOf("") }
-    var memoryStats by remember { mutableStateOf(MemoryStore.Stats(0, 0)) }
-    var confirmClearMemory by remember { mutableStateOf(false) }
-
-    // 上下文压缩
-    var autoCompress by remember { mutableStateOf(store.autoCompress) }
-    // 预算随档案走，切换档案时跟着换（见上面 current 的说明）
-    var budgetText by remember(current?.id) {
-        mutableStateOf((current?.contextBudget ?: CredentialStore.DEFAULT_CONTEXT_BUDGET).toString())
-    }
-    var keepRecentText by remember { mutableStateOf(store.keepRecent.toString()) }
-
-    // 本机 shell（默认关闭；鸿蒙上整块隐藏）
-    var shellEnabled by remember { mutableStateOf(store.shellEnabled) }
-
-    // 记忆正文在 IO 线程读，进来时加载一次即可
-    LaunchedEffect(Unit) {
-        memoryText = vm.memory.load()
-        memoryStats = vm.memory.stats()
-    }
-
-    // 提示词是否已被用户固定。未固定时它随工具表自动生成
-    var promptCustomized by remember { mutableStateOf(store.hasCustomSystemPrompt) }
-
-    // 工作区：选目录后要立刻刷新界面上的名字，所以用状态而不是直接读 vm
-    val state by vm.state.collectAsState()
-    var workspaceName by remember(state.workspaceName) {
-        mutableStateOf(state.workspaceName)
-    }
-
-    // 目录选择器。和 ChatScreen 里那个是同一套 SAF 契约，
-    // 但必须各自持有一个 launcher —— ActivityResult 的注册是绑在组合位置上的
+    // 目录选择器和子页里的那套是同一个 SAF 契约，但必须各自持有一个 launcher
     val workspacePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree()
-    ) { uri ->
-        uri?.let {
-            vm.onWorkspacePicked(it)
-            // onWorkspacePicked 是异步的（要 await 持久化授权），
-            // 状态变化由上面 remember(state.workspaceName) 自动同步
-        }
+    ) { uri -> uri?.let { vm.onWorkspacePicked(it) } }
+
+    // 记忆条数要读文件，异步取。−1 表示还没读到，避免闪一下「0 条」
+    var memoryCount by remember { mutableIntStateOf(-1) }
+    LaunchedEffect(Unit) {
+        memoryCount = runCatching { vm.memory.stats().entries }.getOrDefault(0)
     }
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHost) },
+        topBar = { TopAppBar(title = { Text("设置") }) }
+    ) { padding ->
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding),
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            item {
+                WorkspaceCard(
+                    name = state.workspaceName,
+                    onPick = { workspacePicker.launch(null) }
+                )
+            }
+
+            item {
+                GroupLabel("对话与模型")
+                SettingsGroup {
+                    SettingsEntry(
+                        icon = Icons.Default.SmartToy,
+                        title = "模型与连接",
+                        // 没填 Key 是个真问题：点进去就能填，所以在首页就点出来
+                        subtitle = current?.subtitle?.takeIf { it.isNotBlank() }
+                            ?: "还没有可用的档案",
+                        warning = current?.isConfigured != true,
+                        onClick = { onOpen(SettingsPage.MODEL) }
+                    )
+                    EntryDivider()
+                    SettingsEntry(
+                        icon = Icons.Default.Compress,
+                        title = "上下文压缩",
+                        subtitle = buildString {
+                            append(if (store.autoCompress) "自动压缩" else "不压缩")
+                            append(" · 预算 ")
+                            append(current?.contextBudget?.toString() ?: "—")
+                            append(" token")
+                        },
+                        onClick = { onOpen(SettingsPage.CONTEXT) }
+                    )
+                    EntryDivider()
+                    SettingsEntry(
+                        icon = Icons.Default.Description,
+                        title = "系统提示词",
+                        subtitle = if (store.hasCustomSystemPrompt) "已自定义 · 不再自动更新"
+                        else "自动生成 · 跟随工具表更新",
+                        onClick = { onOpen(SettingsPage.PROMPT) }
+                    )
+                }
+            }
+
+            item {
+                GroupLabel("能力与数据")
+                SettingsGroup {
+                    SettingsEntry(
+                        icon = Icons.Default.Build,
+                        title = "工具与权限",
+                        subtitle = enabledTools(store),
+                        onClick = { onOpen(SettingsPage.TOOLS) }
+                    )
+                    EntryDivider()
+                    SettingsEntry(
+                        icon = Icons.Default.Psychology,
+                        title = "长期记忆",
+                        subtitle = buildString {
+                            append(if (memoryCount < 0) "读取中…" else "$memoryCount 条")
+                            append(" · ")
+                            append(if (store.memoryEnabled) "注入每轮对话" else "未启用")
+                        },
+                        onClick = { onOpen(SettingsPage.MEMORY) }
+                    )
+                }
+            }
+
+            item {
+                SettingsGroup {
+                    SettingsEntry(
+                        icon = Icons.Default.Info,
+                        title = "关于",
+                        subtitle = "v${appVersion()} · 数据去向一览",
+                        onClick = { onOpen(SettingsPage.ABOUT) }
+                    )
+                }
+            }
+
+            item {
+                Text(
+                    "凭据使用 Android Keystore 加密后存储，不会明文保存。",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp)
+                )
+            }
+        }
+    }
+}
+
+/** 首页那一行摘要：把「AI 现在能用什么」压成一句话。 */
+private fun enabledTools(store: com.phoclaw.chat.data.CredentialStore): String {
+    val on = buildList {
+        if (store.searchEnabled) add("联网搜索")
+        if (store.codeExecEnabled) add("代码执行")
+        if (store.shellEnabled && DeviceEnv.shellAvailable) add("本机命令")
+    }
+    return if (on.isEmpty()) "全部关闭 · AI 只能用文件读写" else on.joinToString(" · ")
+}
+
+@Composable
+private fun WorkspaceCard(name: String?, onPick: () -> Unit) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = RoundedCornerShape(14.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Default.Folder,
+                    contentDescription = null,
+                    modifier = Modifier.size(17.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "工作区",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = name ?: "未选择目录",
+                fontSize = 15.sp,
+                fontFamily = if (name != null) FontFamily.Monospace else null,
+                color = if (name != null) MaterialTheme.colorScheme.onSurface
+                else MaterialTheme.colorScheme.error,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                if (name != null) "AI 只能读写这个目录，无法访问目录之外的文件"
+                else "还没有选择目录，AI 目前不能读写任何文件",
+                fontSize = 11.sp,
+                lineHeight = 16.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(12.dp))
+            OutlinedButton(onClick = onPick) {
+                Text(if (name == null) "选择目录" else "更换目录", fontSize = 13.sp)
+            }
+        }
+    }
+}
+
+@Composable
+private fun GroupLabel(text: String) {
+    Text(
+        text,
+        fontSize = 12.sp,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(start = 4.dp, bottom = 6.dp)
+    )
+}
+
+/** 一组入口包成一张卡片。用 Surface 而不是 Card：Card 的默认高度和内边距
+ *  会把「一组三行」撑得很松。 */
+@Composable
+private fun SettingsGroup(content: @Composable ColumnScope.() -> Unit) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = RoundedCornerShape(14.dp),
+        modifier = Modifier.fillMaxWidth(),
+        content = { Column(content = content) }
+    )
+}
+
+@Composable
+private fun EntryDivider() {
+    HorizontalDivider(
+        modifier = Modifier.padding(start = 52.dp),
+        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+    )
+}
+
+@Composable
+private fun SettingsEntry(
+    icon: ImageVector,
+    title: String,
+    subtitle: String,
+    warning: Boolean = false,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 13.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            icon,
+            contentDescription = null,
+            modifier = Modifier.size(20.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(Modifier.width(16.dp))
+        Column(Modifier.weight(1f)) {
+            Text(title, fontSize = 15.sp)
+            Spacer(Modifier.height(2.dp))
+            Text(
+                subtitle,
+                fontSize = 12.sp,
+                color = if (warning) MaterialTheme.colorScheme.error
+                else MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        Icon(
+            Icons.Default.KeyboardArrowRight,
+            contentDescription = null,
+            modifier = Modifier.size(18.dp),
+            tint = MaterialTheme.colorScheme.outline
+        )
+    }
+}
+
+@Composable
+internal fun appVersion(): String {
+    val context = LocalContext.current
+    return remember {
+        runCatching {
+            @Suppress("DEPRECATION")
+            context.packageManager.getPackageInfo(context.packageName, 0).versionName
+        }.getOrNull().orEmpty()
+    }
+}
+
+// ------------------------------------------------------------------ 共用外壳
+
+/**
+ * 二级页的统一外壳：返回箭头 + 标题 + 可选的底部操作栏。
+ *
+ * 底部操作栏是这次改版顺带解决的一个真问题：原来「保存」按钮夹在页面中间，
+ * 用户在下面的输入框里改完，得往上翻才能保存。固定在底部之后，滚到哪都看得见。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun SettingsPageScaffold(
+    title: String,
+    onBack: () -> Unit,
+    snackbarHost: SnackbarHostState,
+    bottomBar: (@Composable () -> Unit)? = null,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHost) },
         topBar = {
             TopAppBar(
-                title = { Text("设置") }
+                title = { Text(title) },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.Default.ArrowBack, contentDescription = "返回")
+                    }
+                }
             )
+        },
+        bottomBar = {
+            if (bottomBar != null) {
+                Surface(tonalElevation = 3.dp) {
+                    Column(Modifier.fillMaxWidth()) {
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+                            bottomBar()
+                        }
+                    }
+                }
+            }
         }
     ) { padding ->
         Column(
@@ -159,830 +427,80 @@ fun SettingsScreen(
                 .padding(padding)
                 .verticalScroll(rememberScrollState())
                 .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+            content = content
+        )
+    }
+}
+
+/** 二级页里的小标题。比 titleMedium 小一号，和正文拉开但不喧宾夺主。 */
+@Composable
+internal fun SectionLabel(text: String) {
+    Text(
+        text,
+        fontSize = 13.sp,
+        color = MaterialTheme.colorScheme.primary
+    )
+}
+
+/** 说明文字。11sp / 16sp 行高是这一版统一后的规格 —— 原来 11 和 12 混着用。 */
+@Composable
+internal fun HintText(
+    text: String,
+    color: Color = MaterialTheme.colorScheme.onSurfaceVariant,
+    fontSize: TextUnit = 11.sp
+) {
+    Text(text, fontSize = fontSize, lineHeight = fontSize * 1.45f, color = color)
+}
+
+/** 开关行。整块可点，不是只有开关可点 —— 手指落在文字上也算。 */
+@Composable
+internal fun ToggleRow(
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    enabled: Boolean = true,
+    onChange: (Boolean) -> Unit
+) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(enabled = enabled) { onChange(!checked) }
+                .padding(horizontal = 14.dp, vertical = 11.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            /*
-             * 工作区放在最上面：它是整个应用的前提 —— 没有它 AI 什么都读写不了，
-             * 而 API Key 只影响「能不能对话」。原来这个入口只挂在聊天页、
-             * 且仅在「还没选工作区」时显示，导致选过之后再也换不掉。
-             */
-            Text("工作区", style = MaterialTheme.typography.titleMedium)
-
-            Surface(
-                color = MaterialTheme.colorScheme.surfaceVariant,
-                shape = RoundedCornerShape(10.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(Modifier.padding(12.dp)) {
-                    Text(
-                        workspaceName ?: "未选择",
-                        fontSize = 14.sp,
-                        fontFamily = if (workspaceName != null) FontFamily.Monospace else null,
-                        color = if (workspaceName != null) MaterialTheme.colorScheme.onSurface
-                        else MaterialTheme.colorScheme.error
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        if (workspaceName != null) "AI 只能读写这个目录，无法访问目录之外的文件"
-                        else "还没有选择目录，AI 目前不能读写任何文件",
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-
-            OutlinedButton(
-                onClick = { workspacePicker.launch(null) },
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text(if (workspaceName == null) "选择工作区目录" else "更换工作区目录")
-            }
-
-            HorizontalDivider()
-
-            Text("模型档案", style = MaterialTheme.typography.titleMedium)
-
-            Text(
-                "每份档案是一套独立的后端地址、Key 与参数。切换到哪个档案，" +
-                        "接下来的对话就用哪个模型 —— 对话页点标题也能直接切。",
-                fontSize = 11.sp,
-                lineHeight = 16.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Box(Modifier.weight(1f)) {
-                    OutlinedButton(
-                        onClick = { profileMenuOpen = true },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(
-                            text = current?.displayName ?: "未配置",
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f, fill = false),
-                            textAlign = TextAlign.Start
-                        )
-                        Icon(
-                            Icons.Default.KeyboardArrowDown,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-                    DropdownMenu(
-                        expanded = profileMenuOpen,
-                        onDismissRequest = { profileMenuOpen = false }
-                    ) {
-                        profileList.forEach { p ->
-                            DropdownMenuItem(
-                                text = {
-                                    Column {
-                                        Text(p.displayName, fontSize = 14.sp)
-                                        Spacer(Modifier.height(2.dp))
-                                        Text(
-                                            p.subtitle,
-                                            fontSize = 11.sp,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                    }
-                                },
-                                trailingIcon = {
-                                    if (p.id == activeId) {
-                                        Icon(
-                                            Icons.Default.Check,
-                                            contentDescription = "当前",
-                                            modifier = Modifier.size(16.dp)
-                                        )
-                                    }
-                                },
-                                onClick = {
-                                    profileMenuOpen = false
-                                    vm.selectProfile(p.id)
-                                }
-                            )
-                        }
-                    }
-                }
-
-                IconButton(onClick = { vm.createProfile() }) {
-                    Icon(Icons.Default.Add, contentDescription = "新建档案")
-                }
-                IconButton(
-                    onClick = { confirmDeleteProfile = true },
-                    // 只剩一份时不给删：空列表会让「当前档案」无处可退，
-                    // 那些依赖它的地方全得加空判断
-                    enabled = profileList.size > 1
-                ) {
-                    Icon(
-                        Icons.Default.DeleteOutline,
-                        contentDescription = "删除档案",
-                        tint = if (profileList.size > 1) MaterialTheme.colorScheme.onSurfaceVariant
-                        else MaterialTheme.colorScheme.outlineVariant
-                    )
-                }
-            }
-
-            OutlinedTextField(
-                value = profileName,
-                onValueChange = { profileName = it },
-                label = { Text("档案名称（可选）") },
-                placeholder = { Text("比如「写代码」「看图」「本地 Ollama」") },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                supportingText = { Text("留空时显示模型名", fontSize = 11.sp) }
-            )
-
-            OutlinedTextField(
-                value = apiKey,
-                onValueChange = { apiKey = it },
-                label = { Text("API Key") },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                visualTransformation = if (showKey) VisualTransformation.None
-                else PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                trailingIcon = {
-                    IconButton(onClick = { showKey = !showKey }) {
-                        Icon(
-                            if (showKey) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                            contentDescription = "显示/隐藏"
-                        )
-                    }
-                }
-            )
-
-            OutlinedTextField(
-                value = baseUrl,
-                onValueChange = { baseUrl = it },
-                label = { Text("Base URL") },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                isError = BaseUrlHint.isFullEndpoint(baseUrl),
-                supportingText = {
-                    val warn = BaseUrlHint.warning(baseUrl)
-                    if (warn != null) {
-                        Text(warn, fontSize = 11.sp, color = MaterialTheme.colorScheme.error)
-                    } else {
-                        Column {
-                            Text("只填到域名，不要带 /v1/chat/completions", fontSize = 11.sp)
-                            Text(
-                                "正确：https://api.deepseek.com\n" +
-                                        "错误：https://api.deepseek.com/v1/chat/completions",
-                                fontSize = 11.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-                }
-            )
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                OutlinedTextField(
-                    value = model,
-                    onValueChange = { model = it },
-                    label = { Text("模型名") },
-                    modifier = Modifier.weight(1.6f),
-                    singleLine = true,
-                    supportingText = { Text("如 deepseek-chat", fontSize = 11.sp) }
-                )
-                OutlinedTextField(
-                    value = temperatureText,
-                    onValueChange = { v ->
-                        // 只收数字和小数点，且最多两位小数 —— 手动挡在这里
-                        // 比弹一个滑杆好：用户可以精确输入 1.0（推理模型常要求）
-                        temperatureText = v.filter { it.isDigit() || it == '.' }
-                            .let { if (it.count { c -> c == '.' } > 1) it.dropLast(1) else it }
-                            .take(4)
-                    },
-                    label = { Text("温度", fontSize = 11.sp) },
-                    modifier = Modifier.weight(1f),
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                    supportingText = { Text("0 ~ 2", fontSize = 11.sp) }
-                )
-            }
-
-            // 视觉开关。默认关闭是刻意的保守选择：多模态要求把 content 写成数组，
-            // 而不支持视觉的后端收到数组会直接报 400。
-            Surface(
-                color = MaterialTheme.colorScheme.surfaceVariant,
-                shape = RoundedCornerShape(12.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text("模型支持看图", fontSize = 14.sp)
-                        Spacer(Modifier.height(3.dp))
-                        Text(
-                            "开启后，你发的图片会以 Base64 传给模型。\n" +
-                                    "若模型不支持视觉，请保持关闭 —— 此时只发图片的文字说明，" +
-                                    "否则部分后端会直接报错。",
-                            fontSize = 11.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    Spacer(Modifier.width(10.dp))
-                    Switch(
-                        checked = modelSupportsVision,
-                        onCheckedChange = { modelSupportsVision = it }
-                    )
-                }
-            }
-
-            Surface(
-                color = MaterialTheme.colorScheme.surfaceVariant,
-                shape = RoundedCornerShape(12.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text("显示思考过程", fontSize = 14.sp)
-                        Spacer(Modifier.height(3.dp))
-                        Text(
-                            "推理模型（deepseek-reasoner、Kimi、QwQ 等）会先输出一段内心独白。" +
-                                    "开启后在回答上方显示为可折叠的小块；普通模型没有这个字段，" +
-                                    "开了也不会有内容。",
-                            fontSize = 11.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    Spacer(Modifier.width(10.dp))
-                    Switch(
-                        checked = showReasoning,
-                        onCheckedChange = { showReasoning = it }
-                    )
-                }
-            }
-
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(
-                    onClick = {
-                        val hadRedundantPath = BaseUrlHint.hasRedundantPath(baseUrl)
-                        val saved = saveDraft()
-                        // 回显清洗后的值，让用户看到实际生效的地址
-                        saved?.let { baseUrl = it.baseUrl }
-                        scope.launch {
-                            snackbarHost.showSnackbar(
-                                when {
-                                    saved == null -> "没有可保存的档案"
-                                    hadRedundantPath -> "已保存，地址已自动清理为 ${saved.baseUrl}"
-                                    else -> "已保存"
-                                }
-                            )
-                        }
-                    },
-                    modifier = Modifier.weight(1f)
-                ) { Text("保存") }
-
-                OutlinedButton(
-                    onClick = {
-                        saveDraft()
-                        testing = true
-                        scope.launch {
-                            val result = vm.testConnection()
-                            testing = false
-                            snackbarHost.showSnackbar(
-                                result.fold({ "连接成功：$it" }, { "失败：${it.message}" })
-                            )
-                        }
-                    },
-                    enabled = !testing && apiKey.isNotBlank(),
-                    modifier = Modifier.weight(1f)
-                ) { Text(if (testing) "测试中…" else "测试连接") }
-            }
-
-            HorizontalDivider()
-
-            // ---------------- 联网搜索与网页抓取 ----------------
-
-            Text("联网搜索与网页抓取", style = MaterialTheme.typography.titleMedium)
-
-            Text(
-                "填入 Tavily API Key 后，AI 就能在需要时联网：\n" +
-                        "· `websearch` —— 搜索实时信息（新闻、股价、最新版本号等）\n" +
-                        "· `webfetch` —— 抓取指定网址的正文（用户贴链接让它看时用这个）\n" +
-                        "两者都会在回答里附上来源链接。另外 `http` 指令（发任意 HTTP 请求）" +
-                        "不需要 Key，始终可用。",
-                fontSize = 11.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-
-            OutlinedTextField(
-                value = tavilyKey,
-                onValueChange = { tavilyKey = it },
-                label = { Text("Tavily API Key") },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                placeholder = { Text("tvly-xxxxxxxxxxxx") },
-                visualTransformation = if (showTavily) VisualTransformation.None
-                else PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                supportingText = {
-                    Text(
-                        if (tavilyKey.isBlank()) "留空 = 关闭联网搜索，AI 只能靠已有知识回答"
-                        else "已启用联网搜索",
-                        fontSize = 11.sp,
-                        color = if (tavilyKey.isBlank()) MaterialTheme.colorScheme.onSurfaceVariant
-                        else MaterialTheme.colorScheme.primary
-                    )
-                },
-                trailingIcon = {
-                    IconButton(onClick = { showTavily = !showTavily }) {
-                        Icon(
-                            if (showTavily) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                            contentDescription = "显示/隐藏"
-                        )
-                    }
-                }
-            )
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                OutlinedButton(
-                    onClick = {
-                        store.tavilyKey = tavilyKey
-                        tavilyKey = store.tavilyKey   // 回显 trim 后的值
-                        scope.launch {
-                            snackbarHost.showSnackbar(
-                                if (store.tavilyKey.isBlank()) "已关闭联网搜索"
-                                else "Tavily Key 已保存"
-                            )
-                        }
-                    },
-                    modifier = Modifier.weight(1f)
-                ) { Text("保存设置") }
-
-                OutlinedButton(
-                    onClick = {
-                        store.tavilyKey = tavilyKey
-                        tavilyKey = store.tavilyKey
-                        testingSearch = true
-                        scope.launch {
-                            val result = vm.testSearch()
-                            testingSearch = false
-                            snackbarHost.showSnackbar(
-                                result.fold({ "可用：$it" }, { "失败：${it.message}" })
-                            )
-                        }
-                    },
-                    enabled = !testingSearch && tavilyKey.isNotBlank(),
-                    modifier = Modifier.weight(1f)
-                ) { Text(if (testingSearch) "测试中…" else "测试搜索") }
-            }
-
-            TextButton(
-                onClick = {
-                    scope.launch {
-                        // 用系统浏览器打开 Tavily 控制台，方便申请 Key。
-                        // 不内嵌 WebView：那需要额外维护一套页面，也会让用户
-                        // 在应用内输入第三方账号密码，反而更不安全
-                        runCatching {
-                            context.startActivity(
-                                Intent(Intent.ACTION_VIEW, Uri.parse("https://app.tavily.com"))
-                            )
-                        }.onFailure {
-                            snackbarHost.showSnackbar("没有可用的浏览器，请手动访问 app.tavily.com")
-                        }
-                    }
-                },
-                modifier = Modifier.fillMaxWidth()
-            ) { Text("去 Tavily 申请免费 Key") }
-
-            HorizontalDivider()
-
-            // ---------------- 代码执行 ----------------
-            Text("代码执行", style = MaterialTheme.typography.titleMedium)
-
-            Text(
-                "开启后 AI 可以用 `run` 指令运行代码，支持 Python、JavaScript、C++、C、Java、Go、Rust、Shell 等 30+ 种语言。",
-                fontSize = 12.sp,
-                lineHeight = 18.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-
-            Text(
-                "⚠️ 代码会发送到 wandbox.org 执行 —— 这是第三方服务，代码会离开你的设备。" +
-                        "不要运行含密钥、密码或个人数据的代码。",
-                fontSize = 12.sp,
-                lineHeight = 18.sp,
-                color = MaterialTheme.colorScheme.error
-            )
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text("允许远程执行", fontSize = 14.sp)
-                    Text(
-                        if (codeExecEnabled) "已开启 · 代码会上传到 wandbox.org"
-                        else "已关闭 · 代码不会离开设备",
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                Switch(
-                    checked = codeExecEnabled,
-                    onCheckedChange = { checked ->
-                        codeExecEnabled = checked
-                        store.codeExecEnabled = checked
-                        // 未自定义提示词时，让它重新生成 —— `run` 的可用状态
-                        // 会写进提示词，开关变了模型也该知道
-                        if (!store.hasCustomSystemPrompt) {
-                            systemPrompt = store.systemPrompt
-                        }
-                    }
-                )
-            }
-
-            Text(
-                "远程环境是隔离的，看不到工作区的其它文件；二进制文件无法运行" +
-                        "（Android 10+ 禁止执行可写目录里的 ELF 文件）。",
-                fontSize = 11.sp,
-                lineHeight = 16.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-
-            HorizontalDivider()
-
-            /*
-             * ---------------- 本机命令 ----------------
-             *
-             * 鸿蒙上**整块不渲染**。开关摆在那里却永远用不了，比没有这个功能
-             * 更让人困惑 —— 用户会反复点、反复失败，然后以为是 bug。
-             * 检测逻辑见 DeviceEnv，误判方向是「宁可当成鸿蒙」。
-             */
-            if (DeviceEnv.shellAvailable) {
-                Text("本机命令", style = MaterialTheme.typography.titleMedium)
-
+            Column(Modifier.weight(1f)) {
+                Text(title, fontSize = 14.sp)
+                Spacer(Modifier.height(3.dp))
                 Text(
-                    "开启后 AI 可以用 `shell` 指令在你手机上执行命令 —— 系统自带的 " +
-                            "`ls`、`grep`、`find`、`sed`、`du`、`stat` 这些，支持管道和重定向。",
-                    fontSize = 12.sp,
-                    lineHeight = 18.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-
-                Text(
-                    "⚠️ 命令在你自己的设备上执行，拥有与这个应用相同的权限。" +
-                            "和「代码执行」相反，数据不会离开手机；但删除类命令会真的删掉东西。",
-                    fontSize = 12.sp,
-                    lineHeight = 18.sp,
-                    color = MaterialTheme.colorScheme.error
-                )
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text("允许执行本机命令", fontSize = 14.sp)
-                        Text(
-                            if (shellEnabled) "已开启 · AI 可以运行 shell 命令"
-                            else "已关闭 · AI 只能用文件读写指令",
-                            fontSize = 11.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    Switch(
-                        checked = shellEnabled,
-                        onCheckedChange = { checked ->
-                            shellEnabled = checked
-                            store.shellEnabled = checked
-                            // 开关状态会写进系统提示词，变了就得重新生成，
-                            // 否则模型还以为没开
-                            if (!store.hasCustomSystemPrompt) {
-                                systemPrompt = store.systemPrompt
-                            }
-                        }
-                    )
-                }
-
-                Text(
-                    "· 命令在应用沙箱里跑，工作区文件会镜像到沙箱，改过的文件自动同步回去\n" +
-                            "· 没有 python / node / gcc —— 要跑真正的代码请用「代码执行」\n" +
-                            "· 单条命令 30 秒超时，输出超过 8000 字符会截断\n" +
-                            "· 删除类命令（rm -rf、mkfs、pm uninstall 等）会先弹确认框\n" +
-                            "· 碰不到 /sdcard 和其它应用的数据，这是系统限制，不是配置问题",
+                    subtitle,
                     fontSize = 11.sp,
                     lineHeight = 16.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-
-                HorizontalDivider()
             }
-
-            // ---------------- 长期记忆 ----------------
-            Text("长期记忆", style = MaterialTheme.typography.titleMedium)
-
-            Text(
-                "AI 会把这些内容带进**每一轮**对话，不用每次重复交代。存在 App 私有目录里，" +
-                        "换工作区也不会丢。你也可以直接对它说「记住…」，它会自己写进来。",
-                fontSize = 12.sp,
-                lineHeight = 18.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text("注入到每轮对话", fontSize = 14.sp)
-                    Text(
-                        if (memoryEnabled) "已开启 · 记忆会影响之后所有对话"
-                        else "已关闭 · 内容保留但不发给模型",
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                Switch(
-                    checked = memoryEnabled,
-                    onCheckedChange = { checked ->
-                        memoryEnabled = checked
-                        store.memoryEnabled = checked
-                    }
-                )
-            }
-
-            OutlinedTextField(
-                value = memoryText,
-                onValueChange = { memoryText = it },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 140.dp),
-                textStyle = MaterialTheme.typography.bodySmall
-                    .copy(fontFamily = FontFamily.Monospace),
-                placeholder = {
-                    Text(
-                        "空的时候可以让 AI 自己写，也可以在这里手写，比如：\n- 用户偏好深色主题\n- 项目用 Kotlin 2.0，不要建议降到 1.x",
-                        fontSize = 12.sp
-                    )
-                },
-                supportingText = {
-                    Text(
-                        "${memoryStats.entries} 条 · ${memoryStats.chars} 字符" +
-                                "（上限 ${MemoryStore.MAX_FILE_CHARS} 字符 / ${MemoryStore.MAX_ENTRIES} 条）",
-                        fontSize = 11.sp
-                    )
-                }
-            )
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                OutlinedButton(
-                    onClick = {
-                        scope.launch {
-                            vm.memory.save(memoryText)
-                                .onSuccess {
-                                    // 必须重新载入缓存，否则用户改完记忆、
-                                    // 下一句话却没生效，会以为是功能坏了
-                                    vm.reloadMemory()
-                                    memoryStats = vm.memory.stats()
-                                    snackbarHost.showSnackbar("记忆已保存")
-                                }
-                                .onFailure {
-                                    snackbarHost.showSnackbar("保存失败：${it.message}")
-                                }
-                        }
-                    },
-                    modifier = Modifier.weight(1f)
-                ) { Text("保存记忆") }
-
-                TextButton(
-                    onClick = { confirmClearMemory = true },
-                    modifier = Modifier.weight(1f)
-                ) { Text("清空", color = MaterialTheme.colorScheme.error) }
-            }
-
-            Text(
-                "记忆写多了会挤占上下文。AI 自己也会往里写，定期清掉不再成立的内容 ——" +
-                        "比如「这个项目已完结」之类过期的东西。",
-                fontSize = 11.sp,
-                lineHeight = 16.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-
-            HorizontalDivider()
-
-            // ---------------- 上下文压缩 ----------------
-            Text("上下文压缩", style = MaterialTheme.typography.titleMedium)
-
-            Text(
-                "对话变长之后，早期消息会被**压成摘要**再发给模型，而不是原样全发。" +
-                        "界面里的记录一条都不会少，只是模型看到的是浓缩版 —— " +
-                        "不这样做的话，聊到一定长度请求会被后端直接拒绝。",
-                fontSize = 12.sp,
-                lineHeight = 18.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text("超预算时自动压缩", fontSize = 14.sp)
-                    Text(
-                        if (autoCompress) "已开启 · 压缩会额外调用一次模型"
-                        else "已关闭 · 长对话最终会因超长报错",
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                Switch(
-                    checked = autoCompress,
-                    onCheckedChange = { checked ->
-                        autoCompress = checked
-                        store.autoCompress = checked
-                    }
-                )
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                OutlinedTextField(
-                    value = budgetText,
-                    onValueChange = { v ->
-                        val digits = v.filter { it.isDigit() }.take(7)
-                        budgetText = digits
-                        // 删光时保留旧值，不要因为一次退格就跳到最小值。
-                        // 预算随档案存，所以直接写进当前档案
-                        digits.toIntOrNull()?.let { value ->
-                            current?.let { vm.saveProfile(it.copy(contextBudget = value)) }
-                        }
-                    },
-                    label = { Text("上下文预算", fontSize = 11.sp) },
-                    suffix = { Text("token", fontSize = 11.sp) },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    modifier = Modifier.weight(1f)
-                )
-                OutlinedTextField(
-                    value = keepRecentText,
-                    onValueChange = { v ->
-                        val digits = v.filter { it.isDigit() }.take(2)
-                        keepRecentText = digits
-                        digits.toIntOrNull()?.let { store.keepRecent = it }
-                    },
-                    label = { Text("保留最近", fontSize = 11.sp) },
-                    suffix = { Text("条", fontSize = 11.sp) },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    modifier = Modifier.weight(1f)
-                )
-            }
-
-            Text(
-                "预算按模型的上下文窗口估：64k 的模型填 32000 比较稳，" +
-                        "128k 的可以填到 60000。估算是按字符数量级推的，留足余量比精确更重要。\n" +
-                        "「保留最近」是每次压缩时不动的那几条，压缩会在完整问答之间切分，" +
-                        "不会把一问一答拆散。",
-                fontSize = 11.sp,
-                lineHeight = 16.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-
-            HorizontalDivider()
-
-            Text("系统提示词", style = MaterialTheme.typography.titleMedium)
-            OutlinedTextField(
-                value = systemPrompt,
-                onValueChange = { systemPrompt = it },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 200.dp),
-                textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-                supportingText = {
-                    Text(
-                        if (promptCustomized) {
-                            "已自定义 · 工具说明不再自动更新，点下方「恢复默认」可重新跟随工具表生成"
-                        } else {
-                            "自动生成 · 工具增删后会自动更新，无需手动改"
-                        },
-                        fontSize = 11.sp
-                    )
-                }
-            )
-
-            OutlinedButton(
-                onClick = {
-                    store.systemPrompt = systemPrompt
-                    promptCustomized = true
-                    scope.launch { snackbarHost.showSnackbar("提示词已保存") }
-                },
-                modifier = Modifier.fillMaxWidth()
-            ) { Text("保存提示词") }
-
-            TextButton(
-                onClick = {
-                    store.resetSystemPrompt()
-                    promptCustomized = false
-                    systemPrompt = store.systemPrompt
-                    scope.launch { snackbarHost.showSnackbar("已恢复自动生成") }
-                },
-                modifier = Modifier.fillMaxWidth()
-            ) { Text("恢复默认提示词") }
-
-            Spacer(Modifier.height(20.dp))
-            Text(
-                "凭据使用 Android Keystore 加密后存储，不会明文保存。",
-                fontSize = 11.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+            Spacer(Modifier.width(12.dp))
+            Switch(
+                checked = checked,
+                onCheckedChange = if (enabled) onChange else null,
+                enabled = enabled
             )
         }
     }
+}
 
-    /*
-     * 清空记忆要二次确认。
-     *
-     * 这不是多此一举：记忆是唯一「AI 会自己往里写」的数据，用户可能已经
-     * 攒了几个月的偏好，误触清掉就全没了，而且没有回收站。
-     */
-    if (confirmClearMemory) {
-        AlertDialog(
-            onDismissRequest = { confirmClearMemory = false },
-            title = { Text("清空长期记忆？") },
-            text = {
-                Text(
-                    "共 ${memoryStats.entries} 条、${memoryStats.chars} 字符，" +
-                            "清空后无法恢复。如果只想删掉其中几条，可以自己编辑上面的内容再保存。"
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    confirmClearMemory = false
-                    scope.launch {
-                        vm.memory.clear()
-                            .onSuccess {
-                                memoryText = ""
-                                memoryStats = MemoryStore.Stats(0, 0)
-                                vm.reloadMemory()
-                                snackbarHost.showSnackbar("长期记忆已清空")
-                            }
-                            .onFailure {
-                                snackbarHost.showSnackbar("清空失败：${it.message}")
-                            }
-                    }
-                }) { Text("清空", color = MaterialTheme.colorScheme.error) }
-            },
-            dismissButton = {
-                TextButton(onClick = { confirmClearMemory = false }) { Text("取消") }
-            }
-        )
-    }
-
-    /*
-     * 删档案也要确认。
-     *
-     * 一次误触就是「Key、地址、参数全没了」，而且用户往往记不住那串
-     * API Key 的完整内容 —— 键盘输入框里显示的是圆点，抄不下来。
-     */
-    if (confirmDeleteProfile) {
-        AlertDialog(
-            onDismissRequest = { confirmDeleteProfile = false },
-            title = { Text("删除这份档案？") },
-            text = {
-                Text(
-                    "「${current?.displayName.orEmpty()}」的地址、Key 与参数都会删掉，无法恢复。" +
-                            "已有的对话记录不受影响。"
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    confirmDeleteProfile = false
-                    val id = current?.id
-                    scope.launch {
-                        val ok = id != null && vm.deleteProfile(id)
-                        snackbarHost.showSnackbar(
-                            if (ok) "档案已删除" else "至少要保留一份档案"
-                        )
-                    }
-                }) { Text("删除", color = MaterialTheme.colorScheme.error) }
-            },
-            dismissButton = {
-                TextButton(onClick = { confirmDeleteProfile = false }) { Text("取消") }
-            }
-        )
-    }
+/** 隐私警告。红字只留给「数据会离开设备」这类不能忽略的事。 */
+@Composable
+internal fun WarnText(text: String) {
+    Text(
+        text,
+        fontSize = 11.sp,
+        lineHeight = 16.sp,
+        color = MaterialTheme.colorScheme.error
+    )
 }
