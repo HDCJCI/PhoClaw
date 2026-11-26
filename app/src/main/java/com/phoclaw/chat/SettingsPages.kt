@@ -25,6 +25,7 @@ import com.phoclaw.chat.data.DeviceEnv
 import com.phoclaw.chat.data.MemoryStore
 import com.phoclaw.chat.data.ModelProfile
 import com.phoclaw.chat.util.BaseUrlHint
+import com.phoclaw.chat.util.SystemPromptBuilder
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 
@@ -504,8 +505,21 @@ internal fun PromptSettingsPage(
     val store = vm.credentialStore
     val scope = rememberCoroutineScope()
 
-    var systemPrompt by remember { mutableStateOf(store.systemPrompt) }
-    var promptCustomized by remember { mutableStateOf(store.hasCustomSystemPrompt) }
+    var customText by remember { mutableStateOf(store.customSystemPrompt) }
+    var expandedPreview by remember { mutableStateOf(false) }
+
+    /*
+     * 工具段只跟三个开关有关，和用户写什么都无关，所以在这里算一次。
+     * 展开预览时直接铺全文、不套内部滚动 —— 外层已经是 verticalScroll，
+     * 同方向嵌套会撞上「无限高度约束」的测量异常。
+     */
+    val toolSection = remember(store.codeExecEnabled, store.shellEnabled) {
+        SystemPromptBuilder.toolSection(
+            codeExecEnabled = store.codeExecEnabled,
+            shellEnabled = store.shellEnabled,
+            shellSupported = DeviceEnv.shellAvailable
+        )
+    }
 
     SettingsPageScaffold(
         title = "系统提示词",
@@ -515,9 +529,13 @@ internal fun PromptSettingsPage(
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
                     onClick = {
-                        store.systemPrompt = systemPrompt
-                        promptCustomized = true
-                        scope.launch { snackbarHost.showSnackbar("提示词已保存，工具说明不再自动更新") }
+                        store.customSystemPrompt = customText
+                        scope.launch {
+                            snackbarHost.showSnackbar(
+                                if (customText.isBlank()) "已清空，现在只发工具说明"
+                                else "已保存，工具说明会在每次对话时自动追加"
+                            )
+                        }
                     },
                     modifier = Modifier.weight(1f)
                 ) { Text("保存") }
@@ -525,43 +543,106 @@ internal fun PromptSettingsPage(
                 OutlinedButton(
                     onClick = {
                         store.resetSystemPrompt()
-                        promptCustomized = false
-                        systemPrompt = store.systemPrompt
-                        scope.launch { snackbarHost.showSnackbar("已恢复自动生成") }
+                        customText = ""
+                        scope.launch { snackbarHost.showSnackbar("已清空自定义部分") }
                     },
+                    enabled = customText.isNotBlank(),
                     modifier = Modifier.weight(1f)
-                ) { Text("恢复默认") }
+                ) { Text("清空") }
             }
         }
     ) {
         HintText(
-            "这段内容在每轮对话前发给模型。默认是自动生成的：工具清单、用法、规则、" +
-                    "以及各功能的开关状态都从工具表里拼出来，加了新工具不用手改。\n" +
-                    "一旦你点了「保存」，它就固定成你现在看到的样子，不再跟随工具表更新。"
+            "这里只写你希望 AI 扮演的角色和遵守的约定 —— 「回答用中文」「不要写注释」" +
+                    "「这是个 Kotlin 项目，别建议换框架」这类。\n" +
+                    "工具清单、用法和规则由程序拼好追加在末尾，加了新工具你也不用回来改这里。"
         )
 
-        Surface(
-            color = if (promptCustomized) MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.35f)
-            else MaterialTheme.colorScheme.surfaceVariant,
-            shape = RoundedCornerShape(10.dp),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text(
-                if (promptCustomized) "已自定义 · 新工具不会自动出现在这里"
-                else "自动生成 · 工具增删后自动更新，无需手动改",
-                fontSize = 11.sp,
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
-            )
+        if (store.hasCustomSystemPrompt) {
+            Surface(
+                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f),
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    "已自定义 · 你写的部分不会跟随工具表更新，后半段始终是最新的",
+                    fontSize = 11.sp,
+                    lineHeight = 16.sp,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                )
+            }
         }
 
+        SectionLabel("你的部分")
+
         OutlinedTextField(
-            value = systemPrompt,
-            onValueChange = { systemPrompt = it },
+            value = customText,
+            onValueChange = { customText = it },
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(min = 320.dp),
+                .heightIn(min = 180.dp),
             textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-            supportingText = { Text("${systemPrompt.length} 字符", fontSize = 11.sp) }
+            placeholder = {
+                Text(
+                    "留空 = 只发工具说明（默认）\n\n" +
+                            "比如：\n" +
+                            "- 回答用中文，代码注释也写中文\n" +
+                            "- 这是个 Kotlin + Compose 项目，不要建议换框架\n" +
+                            "- 改文件前先说一句你打算怎么改",
+                    fontSize = 12.sp
+                )
+            },
+            supportingText = { Text("${customText.length} 字符", fontSize = 11.sp) }
+        )
+
+        // 自动追加部分的只读预览。放在可折叠块里：默认收起，需要时才展开，
+        // 否则一屏全是规则，用户自己写的那两行反而找不到了
+        Surface(
+            color = MaterialTheme.colorScheme.surfaceVariant,
+            shape = RoundedCornerShape(12.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        Icons.Default.Build,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text("自动追加的工具说明", fontSize = 13.sp)
+                        Text(
+                            "${toolSection.length} 字符 · 随工具表与开关更新",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    TextButton(onClick = { expandedPreview = !expandedPreview }) {
+                        Text(if (expandedPreview) "收起" else "查看", fontSize = 12.sp)
+                    }
+                }
+
+                if (expandedPreview) {
+                    Spacer(Modifier.height(6.dp))
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        toolSection,
+                        fontSize = 10.sp,
+                        lineHeight = 15.sp,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+
+        HintText(
+            "最终发给模型的 = 你的部分 + 上面这段。两段在每次请求时现拼，" +
+                    "所以你在 1.12 里加个新指令，这里的东西照样是最新的。",
+            color = MaterialTheme.colorScheme.primary
         )
     }
 }

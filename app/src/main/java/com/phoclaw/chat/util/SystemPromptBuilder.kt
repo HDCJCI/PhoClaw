@@ -7,6 +7,15 @@ package com.phoclaw.chat.util
  * 不再手写。这样新增一个工具后，模型立刻就知道它存在 —— 不需要有人记得
  * 同步去改一段藏在 `CredentialStore` 里的多行字符串。
  *
+ * ## 为什么要拆成「自定义部分 + 工具段」
+ *
+ * 1.11.0 之前，用户一旦点保存，**整份**提示词就被固定下来。工具表加了新指令，
+ * 用户得自己把那一段说明重新抄一遍，否则模型根本不知道有这个东西 ——
+ * 而用户想改的往往只是一句「回答用中文」「别写注释」。
+ *
+ * 现在只存用户写的那部分（角色、语气、项目约定），工具段在每次取用时现拼、
+ * 永远追加在末尾。用户负责「AI 是谁」，代码负责「AI 会什么」，两件事分开维护。
+ *
  * @param codeExecEnabled `run` 指令的开关状态。关着的时候仍然把用法写进去，
  *   但会明确告诉模型「现在用不了、要让用户去设置里开」，否则模型会反复重试
  *   一条注定失败的指令。
@@ -17,15 +26,53 @@ package com.phoclaw.chat.util
  */
 object SystemPromptBuilder {
 
+    /** 默认开场白。用户自定义了内容时不再出现 —— 角色由用户自己写。 */
+    private const val HEADER =
+        "你是一个可以直接操作用户手机工作区文件的编程助手。你可以读取、创建、修改、删除、复制和移动文件。"
+
+    /**
+     * 工具段的起始标记。
+     *
+     * 它同时是拆分旧版整份提示词的切分点：1.11.0 之前 `KEY_SYSTEM_PROMPT`
+     * 存的是完整提示词，迁移时从这里切开，前面那截才是用户真正写的东西。
+     */
+    const val TOOL_SECTION_START = "## 指令格式"
+
+    /**
+     * 更严格的切分标记：标题 + 紧跟的那行说明。
+     *
+     * 只用 `## 指令格式` 会误伤一种情况 —— 用户在自定义里恰好让 AI「输出一个
+     * 叫 ## 指令格式 的小标题」。加上后面那行就基本不会撞了：真撞上说明他
+     * 把工具段整段抄进了自定义，那时候切开也是对的。
+     */
+    private const val TOOL_SECTION_MARKER = "## 指令格式\n\n用代码块输出指令"
+
+    /**
+     * 完整提示词 = 自定义部分 + 工具段。
+     *
+     * 自定义为空时用默认开场白，输出与 1.11.0 之前逐字节一致 ——
+     * 没有自定义过的用户升级后不该看到任何变化。
+     */
     fun build(
+        custom: String = "",
+        codeExecEnabled: Boolean = false,
+        shellEnabled: Boolean = false,
+        shellSupported: Boolean = true
+    ): String = compose(custom, toolSection(codeExecEnabled, shellEnabled, shellSupported))
+
+    /** 拼接。工具段可以是缓存过的（只跟开关状态有关，与自定义内容无关）。 */
+    fun compose(custom: String, toolSection: String): String {
+        val c = custom.trim()
+        return if (c.isEmpty()) "$HEADER\n\n$toolSection" else "$c\n\n$toolSection"
+    }
+
+    /** 工具段。不含开场白 —— 开场白只在没有自定义时出现。 */
+    fun toolSection(
         codeExecEnabled: Boolean = false,
         shellEnabled: Boolean = false,
         shellSupported: Boolean = true
     ): String = buildString {
-        appendLine("你是一个可以直接操作用户手机工作区文件的编程助手。你可以读取、创建、修改、删除、复制和移动文件。")
-        appendLine()
-
-        appendLine("## 指令格式")
+        appendLine(TOOL_SECTION_START)
         appendLine()
         appendLine("用代码块输出指令，语言标记为 phoclaw:动作名：")
         appendLine()
@@ -93,6 +140,25 @@ object SystemPromptBuilder {
     }.trimEnd()
 
     /**
+     * 从旧版「整份提示词」里剥出用户真正写的那部分。
+     *
+     * 迁移用。三种情况都要能处理：
+     * - 用户原样保存过（没改任何字）→ 返回空串，视为「未自定义」，
+     *   否则设置页会显示一个「已自定义」而内容与默认一模一样的怪状态；
+     * - 用户改了开场白、保留工具段 → 切出开场白那截；
+     * - 用户整篇重写、压根没有工具段 → 整篇都算他的。
+     */
+    fun extractCustomPart(full: String): String {
+        var marker = full.indexOf(TOOL_SECTION_MARKER)
+        if (marker < 0) marker = full.indexOf(TOOL_SECTION_START)
+        if (marker < 0) return full.trim()
+
+        val head = full.substring(0, marker).trim()
+        // 只有开场白、且与默认一致 = 用户没改过，别假装他自定义了
+        return if (head == HEADER) "" else head
+    }
+
+    /**
      * 把长期记忆拼到系统提示词末尾。
      *
      * 刻意**不**做进 [build]：记忆是运行时的可变数据，而 [build] 的结果
@@ -132,8 +198,7 @@ object SystemPromptBuilder {
 
         val lines = trimmed.split('\n', limit = 2)
         val arg = lines[0].trim()
-        val rest = lines.getOrNull(1).orEmpty()
-
+        val rest = if (lines.size > 1) lines[1].trim('\n') else ""
         return if (rest.isBlank()) {
             "```phoclaw:$name $arg\n```"
         } else {

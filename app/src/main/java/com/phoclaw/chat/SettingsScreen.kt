@@ -184,7 +184,7 @@ private fun SettingsHome(
                     SettingsEntry(
                         icon = Icons.Default.Description,
                         title = "系统提示词",
-                        subtitle = if (store.hasCustomSystemPrompt) "已自定义 · 不再自动更新"
+                        subtitle = if (store.hasCustomSystemPrompt) "已自定义 · 工具说明仍自动追加"
                         else "自动生成 · 跟随工具表更新",
                         onClick = { onOpen(SettingsPage.PROMPT) }
                     )

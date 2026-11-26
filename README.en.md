@@ -2,7 +2,7 @@
 
 An Android app that runs on your phone, holds a conversation, and reads/writes files in your workspace directly.(Just software made out of boredom)
 
-**Current version: v1.11.0** (versionCode 20)
+**Current version: v1.11.1** (versionCode 21)
 
 [中文文档](README.md) · **English** · [Changelog](CHANGELOG.md) · [Downloads](https://github.com/HDCJCI/PhoClaw/releases)
 
@@ -16,14 +16,14 @@ An Android app that runs on your phone, holds a conversation, and reads/writes f
 
 ## Version history
 
-Only the last three versions are listed here. The full record — 20 versions, split into
+Only the last three versions are listed here. The full record — 21 versions, split into
 Added / Fixed / Changed — lives in **[CHANGELOG.md](CHANGELOG.md)** (Chinese).
 
 | Version | versionCode | Changes |
 |---|---|---|
-| **1.11.0** | 20 | **Settings split into a two-level menu.** The home screen keeps six entries (workspace card, then model & connection / context compression / system prompt / tools & permissions / long-term memory / about), each with a one-line status summary — the current backend, which tools are on — so you don't have to open a sub-page to check. Save moved to a pinned bottom bar; the model and memory pages flush on exit so switching pages no longer drops a half-typed key. New "About → where your data goes" list |
+| **1.11.1** | 21 | **Custom prompts no longer freeze the tool section.** Only the user's own part (role, tone, conventions) is stored; the tool list, examples and rules are regenerated on every request and appended at the end, so adding a command never forces you to re-paste the docs. Existing custom prompts are split at `## 指令格式` on first read, keeping just the part you actually wrote |
+| 1.11.0 | 20 | **Settings split into a two-level menu.** The home screen keeps six entries (workspace card, then model & connection / context compression / system prompt / tools & permissions / long-term memory / about), each with a one-line status summary — the current backend, which tools are on — so you don't have to open a sub-page to check. Save moved to a pinned bottom bar; the model and memory pages flush on exit so switching pages no longer drops a half-typed key. New "About → where your data goes" list |
 | 1.10.0 | 19 | **Model profiles + reasoning display + local shell.** Each profile carries its own base URL / key / model / vision flag / reasoning flag / context budget / temperature, switchable from the chat title bar, with the old single config migrated automatically. Reasoning output (`reasoning_content`) renders as a collapsible block above the answer and is never sent back to the API. `shell` runs system commands on the phone (workspace mirrored in and out, destructive commands need confirmation) and is hidden entirely on HarmonyOS |
-| 1.9.0 | 18 | **Long-term memory + context compression.** `memory` command and `MEMORY.md` give cross-session memory, stored in the app's private directory, injected every turn, writable by the AI itself. When over budget, old exchanges are condensed into a **rolling summary** — nothing is removed from the UI, splits align to user boundaries, and the summary is persisted with the conversation |
 
 ## What it is
 

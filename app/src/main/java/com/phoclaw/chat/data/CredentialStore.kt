@@ -257,53 +257,76 @@ class CredentialStore(context: Context) {
     // ---------------------------------------------------------- 全局运行参数
 
     /**
-     * 系统提示词。
+     * 用户自己写的那部分提示词 —— 角色、语气、项目约定这类。
      *
-     * **未自定义时返回动态生成的内容**（[SystemPromptBuilder]），而不是一份
-     * 写死在代码里的字符串。这样新增工具、改工具说明之后，提示词自动跟着变，
-     * 不需要有人记得去同步一份多行文本 —— 之前正是因为忘了同步，
-     * 出现过程序里能执行、模型却不知道有这个指令的情况。
-     *
-     * 用户手动编辑过之后（[hasCustomSystemPrompt] 为 true），就以用户的版本为准，
-     * 不再自动生成 —— 那是用户明确表达的意图，不该被覆盖。
-     *
-     * 生成结果会缓存：这个方法在每一轮工具循环里都会被调用，
-     * 而 `SystemPromptBuilder.build()` 要拼十几段围栏 + 一张表 + 近三十条规则。
-     * 缓存键是「会改变生成内容的运行时开关」的组合。
+     * 工具说明**不存这里**：它在每次读 [systemPrompt] 时现拼，永远追加在后面。
+     * 这样工具表加了新指令，用户的「回答用中文」不用跟着重抄一遍。
      */
-    var systemPrompt: String
-        get() {
-            prefs.getString(KEY_SYSTEM_PROMPT, null)?.let { return it }
-
-            val flag = Triple(codeExecEnabled, shellEnabled, DeviceEnv.shellAvailable)
-            val cached = defaultPromptCache
-            if (cached != null && defaultPromptFlag == flag) return cached
-
-            return SystemPromptBuilder.build(
-                codeExecEnabled = flag.first,
-                shellEnabled = flag.second,
-                shellSupported = flag.third
-            ).also {
-                defaultPromptCache = it
-                defaultPromptFlag = flag
-            }
+    var customSystemPrompt: String
+        get() = prefs.getString(KEY_CUSTOM_PROMPT, null) ?: migrateLegacyPrompt()
+        set(value) {
+            val trimmed = value.trim()
+            val editor = prefs.edit()
+            if (trimmed.isEmpty()) editor.remove(KEY_CUSTOM_PROMPT)
+            else editor.putString(KEY_CUSTOM_PROMPT, trimmed)
+            editor.apply()
         }
-        set(value) = prefs.edit().putString(KEY_SYSTEM_PROMPT, value).apply()
 
-    /** 默认提示词的缓存。见 [systemPrompt] 的说明。 */
+    /**
+     * 完整系统提示词 = 自定义部分 + 工具段（见 [SystemPromptBuilder.compose]）。
+     *
+     * 两个部分分开维护的原因见 `SystemPromptBuilder` 的类注释。这里只负责
+     * 把工具段缓存起来：这个方法在每一轮工具循环里都会被调用，而工具段要拼
+     * 十几段围栏 + 一张表 + 近三十条规则，每次都重算纯属浪费。
+     *
+     * 缓存的是**工具段**而不是最终结果 —— 最终结果还取决于用户自定义的内容，
+     * 那部分随时会变，不该被缓存。
+     */
+    val systemPrompt: String
+        get() {
+            val custom = customSystemPrompt
+            val flag = Triple(codeExecEnabled, shellEnabled, DeviceEnv.shellAvailable)
+            val section = promptSectionCache?.takeIf { promptSectionFlag == flag }
+                ?: SystemPromptBuilder.toolSection(
+                    codeExecEnabled = flag.first,
+                    shellEnabled = flag.second,
+                    shellSupported = flag.third
+                ).also {
+                    promptSectionCache = it
+                    promptSectionFlag = flag
+                }
+            return SystemPromptBuilder.compose(custom, section)
+        }
+
+    /** 工具段的缓存。见 [systemPrompt] 的说明。 */
     @Volatile
-    private var defaultPromptCache: String? = null
+    private var promptSectionCache: String? = null
 
     @Volatile
-    private var defaultPromptFlag: Triple<Boolean, Boolean, Boolean>? = null
+    private var promptSectionFlag: Triple<Boolean, Boolean, Boolean>? = null
 
-    /** 用户是否手动改过提示词。设置页据此显示「恢复默认」。 */
+    /**
+     * 1.11.0 及之前 `KEY_SYSTEM_PROMPT` 存的是「整份提示词」，里面已经内嵌了
+     * 工具段。直接拿来当自定义部分会让工具说明出现两遍，所以读到时先切一刀。
+     *
+     * 旧 key 保留不删：万一要回滚到旧版本，那时读的还是它。
+     */
+    private fun migrateLegacyPrompt(): String {
+        val legacy = prefs.getString(KEY_SYSTEM_PROMPT, null) ?: return ""
+        val custom = SystemPromptBuilder.extractCustomPart(legacy)
+        // 写成空串而不是 remove：下次读到 ""（非 null）就不会反复走迁移
+        prefs.edit().putString(KEY_CUSTOM_PROMPT, custom).apply()
+        return custom
+    }
+
+    /** 用户是否写了自定义部分。设置页据此显示「清空」是否可点。 */
     val hasCustomSystemPrompt: Boolean
-        get() = prefs.contains(KEY_SYSTEM_PROMPT)
+        get() = customSystemPrompt.isNotBlank()
 
-    /** 丢弃自定义提示词，回到随工具表自动生成的内容。 */
+    /** 清空自定义部分。清空后只剩工具段（含默认开场白）。 */
     fun resetSystemPrompt() {
-        prefs.edit().remove(KEY_SYSTEM_PROMPT).apply()
+        // 两个 key 都要删：只删新 key 的话，下次读取会从旧 key 又迁移回来
+        prefs.edit().remove(KEY_CUSTOM_PROMPT).remove(KEY_SYSTEM_PROMPT).apply()
     }
 
     /** 已授权的工作区目录 URI，进程重启后据此恢复。 */
@@ -394,7 +417,11 @@ class CredentialStore(context: Context) {
         /** 旧版的全局上下文预算。现在预算随档案走，这个 key 只在迁移时读一次。 */
         private const val KEY_CONTEXT_BUDGET = "context_budget"
 
+        /** 1.11.0 及之前：整份提示词。现在只读，用于迁移。 */
         private const val KEY_SYSTEM_PROMPT = "system_prompt"
+
+        /** 1.11.1 起：只存用户写的那部分，工具段在运行时拼。 */
+        private const val KEY_CUSTOM_PROMPT = "custom_system_prompt"
         private const val KEY_WORKSPACE_URI = "workspace_uri"
         private const val KEY_TAVILY = "tavily_api_key"
         private const val KEY_CODE_EXEC = "code_exec_enabled"
