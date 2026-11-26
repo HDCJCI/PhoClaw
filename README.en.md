@@ -2,7 +2,7 @@
 
 An Android app that runs on your phone, holds a conversation, and reads/writes files in your workspace directly.(Just software made out of boredom)
 
-**Current version: v1.9.0** (versionCode 18)
+**Current version: v1.10.0** (versionCode 19)
 
 [中文文档](README.md) · **English** · [Changelog](CHANGELOG.md) · [Downloads](https://github.com/HDCJCI/PhoClaw/releases)
 
@@ -16,14 +16,14 @@ An Android app that runs on your phone, holds a conversation, and reads/writes f
 
 ## Version history
 
-Only the last three versions are listed here. The full record — 18 versions, split into
+Only the last three versions are listed here. The full record — 19 versions, split into
 Added / Fixed / Changed — lives in **[CHANGELOG.md](CHANGELOG.md)** (Chinese).
 
 | Version | versionCode | Changes |
 |---|---|---|
-| **1.9.0** | 18 | **Long-term memory + context compression.** `memory` command and `MEMORY.md` give cross-session memory, stored in the app's private directory, injected every turn, writable by the AI itself. When over budget, old exchanges are condensed into a **rolling summary** — nothing is removed from the UI, splits align to user boundaries, and the summary is persisted with the conversation |
-| **1.8.0** | 17 | **Code execution + auto-generated prompt.** `run` executes code in 30+ languages (Python / JS / TS / C / C++ / Java / Go / Rust / Shell …) via Wandbox, off by default. Tool metadata now lives in `ToolCatalog`, which generates the prompt — adding a command means editing one place |
-| **1.7.0** | 16 | **Web fetch + HTTP request + jump-to-bottom.** `webfetch` reads a page's body, `http` calls arbitrary endpoints (write methods need confirmation); their division of labour with `websearch` is stated in the prompt. Plus a persistent "jump to latest" button |
+| **1.10.0** | 19 | **Model profiles + reasoning display + local shell.** Each profile carries its own base URL / key / model / vision flag / reasoning flag / context budget / temperature, switchable from the chat title bar, with the old single config migrated automatically. Reasoning output (`reasoning_content`) renders as a collapsible block above the answer and is never sent back to the API. `shell` runs system commands on the phone (workspace mirrored in and out, destructive commands need confirmation) and is hidden entirely on HarmonyOS |
+| 1.9.0 | 18 | **Long-term memory + context compression.** `memory` command and `MEMORY.md` give cross-session memory, stored in the app's private directory, injected every turn, writable by the AI itself. When over budget, old exchanges are condensed into a **rolling summary** — nothing is removed from the UI, splits align to user boundaries, and the summary is persisted with the conversation |
+| 1.8.0 | 17 | **Code execution + auto-generated prompt.** `run` executes code in 30+ languages (Python / JS / TS / C / C++ / Java / Go / Rust / Shell …) via Wandbox, off by default. Tool metadata now lives in `ToolCatalog`, which generates the prompt — adding a command means editing one place |
 
 ## What it is
 
@@ -78,6 +78,7 @@ infinite loops).
 | `delete <path>` | Delete a file or directory |
 | `run <file or language>` | **Run code** in 30+ languages. File form reads a workspace file; language form runs inline code |
 | `memory <content>` | **Cross-session memory.** No argument = show all, `forget <keyword>` = delete. Independent of the workspace |
+| `shell <command>` | **Run a system command on the phone** (pipes, redirection, `&&`), operating on the workspace directly. **Off by default**, unavailable on HarmonyOS |
 
 **Aliases**: `ls`=`list`, `cp`=`copy`, `mv`=`move`, `rm`/`del`=`delete`, `md`=`mkdir`,
 `grep`/`find`=`search`, `stat`=`info`.

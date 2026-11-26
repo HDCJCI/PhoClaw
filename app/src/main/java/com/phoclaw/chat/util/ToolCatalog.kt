@@ -212,6 +212,29 @@ object ToolCatalog {
             )
         ),
         Tool(
+            action = Action.SHELL,
+            name = "shell",
+            aliases = listOf("sh", "bash", "term", "cmd", "system"),
+            label = "命令",
+            signature = "shell <命令>",
+            summary = "**在本机执行 shell 命令**（管道、重定向、`&&` 都可以），能直接翻工作区文件，数据不出设备",
+            example = "grep -rn \"TODO\" . | head -20",
+            extraExamples = listOf(
+                "ls -la && du -sh *",
+                "find . -name \"*.kt\" | wc -l"
+            ),
+            rules = listOf(
+                "**`shell` 和 `run` 的分工**：要**翻文件、统计、批处理**用 `shell`；要**跑代码、编译、算东西**用 `run`。`shell` 在本机、能看到工作区但只有系统自带工具；`run` 在远程容器、有完整语言环境但看不到工作区。",
+                "**`shell` 和文件指令的分工**：只是想看一眼目录、读一个文件、搜一段关键字，**优先用 `list` / `read` / `search`** —— 它们更快也更省。只有当你要**组合**（管道、`wc -l` 统计、`sort | uniq -c`、批量改名）时，`shell` 才划算。",
+                "**命令的工作目录就是工作区**（一份镜像）。你在这里新建或修改的文件，执行完会**自动同步回真实工作区**，用户能看到。所以可以直接 `echo 内容 > note.txt`。",
+                "**删除不会同步**：`rm` 只删掉沙箱里的副本，真实工作区的文件还在。要真删文件请用 `delete` 指令（会弹确认框）。",
+                "**不要用 `./脚本名` 执行文件**。Android 10+ 的 W^X 策略禁止执行应用可写目录里的可执行文件，一定会失败。要跑自己写的脚本，用 `sh 脚本名` —— 执行的是系统的 sh，脚本本身只是参数，所以能过。",
+                "**没有 python / node / gcc**。本机只有 toybox 工具集（`ls` `cat` `grep` `sed` `awk` `find` `stat` `du` `ps` `date` 等）。需要真正的语言运行时，用 `run`。",
+                "**有 30 秒超时**，输出超过 8000 字符会被截断（保留头尾）。跑长任务前先想清楚会不会卡住 —— 交互式命令（`vim`、`top`、等输入的 `read`）会一直挂到超时，不要用。",
+                "**不要试图访问工作区之外的地方**：`/sdcard`、`/data/data/其它应用` 都会被系统拒绝，报 `Permission denied`。这就是应用沙箱，不是你该绕过去的东西。"
+            )
+        ),
+        Tool(
             action = Action.MEMORY,
             name = "memory",
             aliases = listOf("remember", "memo"),

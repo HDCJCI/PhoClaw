@@ -20,10 +20,13 @@ import com.phoclaw.chat.data.ContextCompressor
 import com.phoclaw.chat.data.ConversationMeta
 import com.phoclaw.chat.data.ConversationStore
 import com.phoclaw.chat.data.CredentialStore
+import com.phoclaw.chat.data.DeviceEnv
 import com.phoclaw.chat.data.LlmClient
 import com.phoclaw.chat.data.MemoryStore
+import com.phoclaw.chat.data.ModelProfile
 import com.phoclaw.chat.data.PendingAttachment
 import com.phoclaw.chat.data.PromptComposer
+import com.phoclaw.chat.data.ShellRunner
 import com.phoclaw.chat.data.Skill
 import com.phoclaw.chat.data.SkillParser
 import com.phoclaw.chat.data.SkillStore
@@ -62,7 +65,15 @@ data class UiMessage(
     /** 该消息正在流式生成中。此时按纯文本渲染，避免未闭合的 Markdown 语法抖动。 */
     val isStreaming: Boolean = false,
     /** 本条消息携带的附件。历史消息里也有值，用于渲染缩略图与生成占位文本。 */
-    val attachments: List<Attachment> = emptyList()
+    val attachments: List<Attachment> = emptyList(),
+    /**
+     * 模型的思考过程（推理模型的 `reasoning_content`）。
+     *
+     * 与 [text] 分开存：思考是旁注，界面上要能折叠，也要能按档案关掉；
+     * 而且**绝不能**回传给 API —— 多数后端收到带 `reasoning_content` 的
+     * assistant 消息会直接 400。
+     */
+    val reasoning: String = ""
 ) {
     /**
      * 是否有任何可渲染内容。
@@ -71,6 +82,15 @@ data class UiMessage(
      * 「只发了图片没打字」的消息整个消失。
      */
     val hasContent: Boolean get() = text.isNotBlank() || attachments.isNotEmpty()
+
+    /**
+     * 有任何值得渲染的东西。
+     *
+     * 比 [hasContent] 多算了 [reasoning] 和 [toolLog] —— 模型可能先思考再调工具，
+     * 一句话没说，那条消息依然要让用户看到「它在想什么」「它动了什么」。
+     */
+    val isRenderable: Boolean
+        get() = hasContent || reasoning.isNotBlank() || toolLog.isNotEmpty()
 }
 
 /** 待用户确认的危险操作（目前仅删除）。 */
@@ -129,6 +149,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** 远程代码执行。是否真的能用由 `credentials.codeExecEnabled` 决定。 */
     private val codeRunner = CodeRunnerClient()
 
+    /** 本机 shell 执行。是否真的能用由「开关 + 设备支持」两个条件共同决定。 */
+    private val shellRunner = ShellRunner(app, workspace)
+
     /** 跨会话长期记忆（`files/MEMORY.md`）。 */
     private val memoryStore = MemoryStore(app)
 
@@ -150,6 +173,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             httpClient = httpTool,
             codeRunner = codeRunner,
             codeExecEnabled = credentials.codeExecEnabled,
+            shellRunner = shellRunner,
+            shellEnabled = credentials.shellEnabled,
+            shellSupported = DeviceEnv.shellAvailable,
             memory = memoryStore
         )
 
@@ -192,6 +218,57 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** 供设置页读写。 */
     val credentialStore: CredentialStore get() = credentials
     val workspaceRepo: WorkspaceRepository get() = workspace
+
+    /**
+     * 模型档案列表，供聊天页与设置页收集。
+     *
+     * `CredentialStore` 本身是同步的（prefs 读写），不是 Flow。
+     * 但 Compose 需要能感知变化，所以在 ViewModel 里镜像一份 StateFlow，
+     * 每次增删改之后调 [refreshProfiles] 推一次。
+     */
+    private val _profiles = MutableStateFlow(credentials.profiles)
+
+    /** 全部档案。 */
+    val profiles: StateFlow<List<ModelProfile>> = _profiles.asStateFlow()
+
+    private val _activeProfileId = MutableStateFlow(credentials.activeProfileId)
+
+    /** 当前选中的档案 id。 */
+    val activeProfileId: StateFlow<String> = _activeProfileId.asStateFlow()
+
+    /** 把存储层的真值同步到界面。任何档案写操作之后都要调用。 */
+    fun refreshProfiles() {
+        _profiles.value = credentials.profiles
+        _activeProfileId.value = credentials.activeProfileId
+    }
+
+    /** 切换档案。流式生成过程中禁止 —— 半个回答用 A 模型、半个用 B 模型毫无意义。 */
+    fun selectProfile(id: String) {
+        if (_state.value.isStreaming) return
+        credentials.selectProfile(id)
+        refreshProfiles()
+    }
+
+    /** 新建一份空白档案并切过去，返回它的 id（设置页据此滚到新档案）。 */
+    fun createProfile(): String {
+        val created = credentials.createProfile()
+        refreshProfiles()
+        return created.id
+    }
+
+    /** 保存档案。返回落盘后的版本（地址可能被清洗过）。 */
+    fun saveProfile(profile: ModelProfile): ModelProfile {
+        val saved = credentials.upsertProfile(profile)
+        refreshProfiles()
+        return saved
+    }
+
+    /** 删除档案。返回 false 表示这是最后一份，不允许删。 */
+    fun deleteProfile(id: String): Boolean {
+        val ok = credentials.deleteProfile(id)
+        if (ok) refreshProfiles()
+        return ok
+    }
 
     private var streamJob: Job? = null
 
@@ -552,8 +629,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun persistCurrentConversation(immediate: Boolean = false) {
         val messages = _state.value.messages
             .filterNot { it.isStreaming }   // 半截内容不落盘
-            // 纯附件消息也要存 —— 只看 text 会把「只发了张图」的消息整个丢掉
-            .filter { it.hasContent || it.toolLog.isNotEmpty() }
+            // 纯附件消息也要存 —— 只看 text 会把「只发了张图」的消息整个丢掉；
+            // 只有思考过程的消息同理
+            .filter { it.isRenderable }
             .map { it.toStoredMessage() }
         if (messages.isEmpty()) return
 
@@ -765,36 +843,56 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      */
     private suspend fun streamingCompletion(): StreamResult? {
         val buffer = StringBuilder()
+        val thinking = StringBuilder()
         var messageIndex = -1
         var failed = false
+
+        /** 首次收到任何增量时就地创建助手气泡，后续增量的更新都用同一个下标。 */
+        fun ensureBubble() {
+            if (messageIndex >= 0) return
+            _state.update {
+                it.copy(messages = it.messages +
+                        UiMessage(ChatMessage.ROLE_ASSISTANT, "", isStreaming = true))
+            }
+            messageIndex = _state.value.messages.lastIndex
+        }
+
+        fun updateBubble(transform: (UiMessage) -> UiMessage) {
+            val idx = messageIndex
+            if (idx < 0) return
+            _state.update { s ->
+                if (idx > s.messages.lastIndex) s
+                else s.copy(
+                    messages = s.messages.toMutableList().also { it[idx] = transform(it[idx]) }
+                )
+            }
+        }
 
         llm.stream(
             baseUrl = credentials.baseUrl,
             apiKey = credentials.apiKey,
             model = credentials.model,
-            messages = buildApiMessages()
+            messages = buildApiMessages(),
+            temperature = credentials.temperature
         ).collect { event ->
             when (event) {
                 is StreamEvent.Delta -> {
                     buffer.append(event.text)
-                    if (messageIndex < 0) {
-                        _state.update {
-                            it.copy(messages = it.messages +
-                                    UiMessage(ChatMessage.ROLE_ASSISTANT, "", isStreaming = true))
-                        }
-                        messageIndex = _state.value.messages.lastIndex
-                    }
-                    val idx = messageIndex
+                    ensureBubble()
                     val text = buffer.toString()
-                    _state.update { s ->
-                        if (idx > s.messages.lastIndex) s
-                        else s.copy(
-                            messages = s.messages.toMutableList().also {
-                                it[idx] = it[idx].copy(text = text, isStreaming = true)
-                            }
-                        )
-                    }
+                    updateBubble { it.copy(text = text, isStreaming = true) }
                 }
+
+                is StreamEvent.ReasoningDelta -> {
+                    // 档案里关掉「显示思考」后直接丢弃：内容已经到达本地，
+                    // 但用户明确表示不想看，不该在界面上留痕迹
+                    if (!credentials.showReasoning) return@collect
+                    thinking.append(event.text)
+                    ensureBubble()
+                    val full = thinking.toString()
+                    updateBubble { it.copy(reasoning = full, isStreaming = true) }
+                }
+
                 is StreamEvent.Failed -> {
                     failed = true
                     _state.update {
@@ -806,7 +904,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
         if (failed) return null
         val text = buffer.toString()
-        if (text.isBlank()) return null
+        if (text.isBlank()) {
+            // 只有思考、没有正文（推理模型想完就停，或者被用户中断）。
+            // 必须清掉流式标记，否则那个转圈的骨架屏会一直挂在那里
+            if (thinking.isNotEmpty() && messageIndex >= 0) finalizeAssistant(messageIndex, "")
+            return null
+        }
         return StreamResult(text, messageIndex)
     }
 
@@ -1530,7 +1633,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         isError = isError,
         toolLog = toolLog,
         isInternal = isInternal,
-        attachments = attachments
+        attachments = attachments,
+        reasoning = reasoning
     )
 
     private fun StoredMessage.toUiMessage() = UiMessage(
@@ -1540,7 +1644,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         toolLog = toolLog,
         isInternal = isInternal,
         isStreaming = false,
-        attachments = attachments
+        attachments = attachments,
+        reasoning = reasoning
     )
 
     private fun newId(): String = UUID.randomUUID().toString().replace("-", "").take(16)

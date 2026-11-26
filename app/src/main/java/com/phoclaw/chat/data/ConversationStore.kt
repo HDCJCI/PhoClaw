@@ -48,7 +48,15 @@ data class StoredMessage(
     val toolLog: List<String> = emptyList(),
     val isInternal: Boolean = false,
     /** 本条消息携带的附件。旧数据没有这个字段，默认空列表即可兼容。 */
-    val attachments: List<Attachment> = emptyList()
+    val attachments: List<Attachment> = emptyList(),
+    /**
+     * 模型的思考过程。旧数据没有这个字段，默认空串。
+     *
+     * 落盘的目的是让用户翻历史时还能回看「当时它怎么想的」——
+     * 但**只用于显示**：转成 API 消息时这个字段会被丢掉，
+     * 否则带 `reasoning_content` 的 assistant 消息会让部分后端直接 400。
+     */
+    val reasoning: String = ""
 )
 
 /**
@@ -174,6 +182,9 @@ class ConversationStore(context: Context) {
                 put("text", msg.text)
                 put("isError", msg.isError)
                 put("isInternal", msg.isInternal)
+                // 只在非空时写：不开思考的模型、以及所有历史消息
+                // 都不该因为多了这个字段让 JSON 变大
+                if (msg.reasoning.isNotBlank()) put("reasoning", msg.reasoning)
                 if (msg.toolLog.isNotEmpty()) {
                     put("toolLog", JSONArray().apply { msg.toolLog.forEach { put(it) } })
                 }
@@ -220,7 +231,8 @@ class ConversationStore(context: Context) {
                     toolLog = if (logArray == null) emptyList()
                     else (0 until logArray.length()).map { logArray.optString(it) },
                     isInternal = obj.optBoolean("isInternal"),
-                    attachments = parseAttachments(attArray)
+                    attachments = parseAttachments(attArray),
+                    reasoning = obj.optString("reasoning")
                 )
             }
         }

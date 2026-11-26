@@ -10,10 +10,18 @@ package com.phoclaw.chat.util
  * @param codeExecEnabled `run` 指令的开关状态。关着的时候仍然把用法写进去，
  *   但会明确告诉模型「现在用不了、要让用户去设置里开」，否则模型会反复重试
  *   一条注定失败的指令。
+ * @param shellEnabled `shell` 指令的开关状态。理由同上。
+ * @param shellSupported 设备本身是否支持本机命令。鸿蒙上为 false ——
+ *   这时要说的是「这设备不行」，而不是「去设置里开一下」，
+ *   否则用户会跑去设置页发现根本没有这个开关。
  */
 object SystemPromptBuilder {
 
-    fun build(codeExecEnabled: Boolean = false): String = buildString {
+    fun build(
+        codeExecEnabled: Boolean = false,
+        shellEnabled: Boolean = false,
+        shellSupported: Boolean = true
+    ): String = buildString {
         appendLine("你是一个可以直接操作用户手机工作区文件的编程助手。你可以读取、创建、修改、删除、复制和移动文件。")
         appendLine()
 
@@ -47,10 +55,10 @@ object SystemPromptBuilder {
             addAll(ToolCatalog.groupRules)
             ToolCatalog.tools.forEach { tool ->
                 addAll(tool.rules)
-                // 开关状态紧跟在 run 的规则后面，模型读到「run 有开关」
+                // 开关状态紧跟在规则后面：模型读到「run 有开关」，
                 // 下一句就是「现在开没开」，不用翻到全文末尾去找
-                if (tool.action == CommandParser.Command.Action.RUN) {
-                    add(
+                when (tool.action) {
+                    CommandParser.Command.Action.RUN -> add(
                         if (codeExecEnabled) {
                             "「代码执行」当前**已开启**，`run` 可以直接用。"
                         } else {
@@ -58,6 +66,24 @@ object SystemPromptBuilder {
                                     "直接告诉他去「设置 → 代码执行」打开开关，不要反复重试。"
                         }
                     )
+
+                    CommandParser.Command.Action.SHELL -> add(
+                        when {
+                            !shellSupported ->
+                                "**本设备不支持 `shell`**（检测到鸿蒙系统，或系统没有可用的 sh）。" +
+                                        "用户要用 `shell` 时，直接说明不支持、不要尝试；" +
+                                        "需要跑代码改用 `run`。"
+
+                            shellEnabled ->
+                                "「本机命令」当前**已开启**，`shell` 可以直接用。"
+
+                            else ->
+                                "「本机命令」当前**未开启**：`shell` 会立刻返回「命令执行未启用」。用户想让你执行命令时，" +
+                                        "直接告诉他去「设置 → 本机命令」打开开关，不要反复重试。"
+                        }
+                    )
+
+                    else -> Unit
                 }
             }
         }

@@ -18,6 +18,11 @@ import com.phoclaw.chat.util.CommandParser
  * @param codeRunner 远程代码执行客户端。代码会发送到 wandbox.org
  * @param codeExecEnabled 用户是否在设置里打开了「代码执行」。默认关闭 ——
  *   把代码上传到第三方是明确的数据外发行为，不能让用户被动接受
+ * @param shellRunner 本机 shell 执行器。传 null 表示当前环境没这个能力
+ * @param shellEnabled 用户是否打开了「本机命令」。默认关闭 ——
+ *   这是把设备执行权交给模型，比 `run` 更进一步
+ * @param shellSupported 设备本身支持不支持。鸿蒙上为 false，
+ *   这时无论开关怎么设都直接拒绝，并说明是**设备**的问题
  * @param memory 长期记忆存储。与工作区**无关**：没授权工作区时记忆照样可用
  */
 class CommandDispatcher(
@@ -28,6 +33,9 @@ class CommandDispatcher(
     private val httpClient: HttpToolClient? = null,
     private val codeRunner: CodeRunnerClient? = null,
     private val codeExecEnabled: Boolean = false,
+    private val shellRunner: ShellRunner? = null,
+    private val shellEnabled: Boolean = false,
+    private val shellSupported: Boolean = true,
     private val memory: MemoryStore? = null
 ) {
 
@@ -82,6 +90,9 @@ class CommandDispatcher(
 
         // run 指令：参数行是「文件或语言」，正文是内联代码（仅语言形式用）
         CommandParser.Command.Action.RUN -> run(cmd.path, cmd.content)
+
+        // shell 指令：参数行是命令，正文可作为多行命令的后续部分
+        CommandParser.Command.Action.SHELL -> runShell(cmd.path, cmd.content)
 
         // memory 指令：参数行是内容或子命令，正文可作为多行内容的备选来源
         CommandParser.Command.Action.MEMORY -> memory(cmd.path, cmd.content)
@@ -361,6 +372,47 @@ class CommandDispatcher(
         )
     }
 
+    /**
+     * 在本机执行 shell 命令。
+     *
+     * 三道门按顺序拦：
+     * 1. **设备不支持**（鸿蒙 / 没有 sh）→ 说清是设备的问题，别让模型去翻设置；
+     * 2. **开关没开** → 让模型提示用户去开；
+     * 3. 都没有，才真的执行。
+     *
+     * 顺序不能反：先报开关再报设备，用户会切到设置页发现没有那个开关。
+     *
+     * 命令正文（[content]）会拼到参数行后面 —— 多行命令（比如 `for` 循环、
+     * 带续行符的长管道）在指令块里自然就是这么写的。
+     */
+    private suspend fun runShell(arg: String, content: String): String {
+        if (!shellSupported) {
+            return "本机命令执行不可用：这台设备是鸿蒙系统，或者系统里没有可用的 shell。" +
+                    "这是设备限制，不是开关问题，**不要让用户去设置里找开关**。" +
+                    "需要运行代码可以用 `run`（远程执行），或者直接用文件指令完成。"
+        }
+        if (!shellEnabled) {
+            return "命令执行未启用：用户还没有在「设置 → 本机命令」里打开开关。" +
+                    "请直接告诉用户需要打开它，不要重复尝试。"
+        }
+        val client = shellRunner ?: return "命令执行不可用（当前环境未提供该能力）"
+
+        val command = buildString {
+            if (arg.isNotBlank() && arg != ".") append(arg)
+            if (content.isNotBlank()) {
+                if (isNotEmpty()) append('\n')
+                append(content)
+            }
+        }.trim()
+
+        if (command.isEmpty()) {
+            return "请提供要执行的命令，格式：\n```phoclaw:shell ls -la\n```"
+        }
+
+        val result = client.run(command)
+        return client.formatForModel(command, result)
+    }
+
     /** 判断是否像 http(s) 网址。 */
     private fun looksLikeUrl(s: String): Boolean =
         s.startsWith("http://", true) || s.startsWith("https://", true)
@@ -426,6 +478,11 @@ class CommandDispatcher(
                     .firstOrNull()?.uppercase().orEmpty()
                 HttpToolClient.isMutating(method)
             }
+            // shell 只拦「不可逆」的那几类（见 ShellRunner.DANGEROUS_PATTERNS）。
+            // 全部拦会让 8 轮工具调用变成连点 8 次确认，用户最后只会在
+            // 没看内容的情况下闭眼点「允许」，比不拦更糟
+            CommandParser.Command.Action.SHELL ->
+                ShellRunner.isDangerous((cmd.path + " " + cmd.content).trim())
             else -> false
         }
 
@@ -434,6 +491,7 @@ class CommandDispatcher(
             CommandParser.Command.Action.DELETE -> "删除 ${cmd.path}"
             CommandParser.Command.Action.MOVE ->
                 if (cmd.target.isBlank()) "移动 ${cmd.path}" else "移动 ${cmd.path} → ${cmd.target}"
+            CommandParser.Command.Action.SHELL -> "执行命令 ${cmd.path.take(120)}"
             CommandParser.Command.Action.HTTP -> {
                 // 确认框要把「发到哪」说清楚 —— 这是用户唯一能看懂的机会
                 val parts = cmd.path.trim().split(Regex("\\s+")).filter { it.isNotBlank() }

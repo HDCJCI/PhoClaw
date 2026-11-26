@@ -10,8 +10,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Visibility
-import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -21,9 +20,14 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.phoclaw.chat.data.CredentialStore
+import com.phoclaw.chat.data.DeviceEnv
 import com.phoclaw.chat.data.MemoryStore
+import com.phoclaw.chat.data.ModelProfile
 import com.phoclaw.chat.util.BaseUrlHint
 import kotlinx.coroutines.launch
 
@@ -37,13 +41,57 @@ fun SettingsScreen(
     val context = LocalContext.current
     val snackbarHost = remember { SnackbarHostState() }
 
-    var apiKey by remember { mutableStateOf(store.apiKey) }
-    var baseUrl by remember { mutableStateOf(store.baseUrl) }
-    var model by remember { mutableStateOf(store.model) }
-    var modelSupportsVision by remember { mutableStateOf(store.modelSupportsVision) }
+    /*
+     * 模型档案。
+     *
+     * 编辑的永远是「当前选中的那一份」，所以所有输入框的 state 都用当前
+     * 档案的 id 当 remember 的 key —— 切换档案时它们会自动重新载入，
+     * 不需要手写一遍「切换后重置全部字段」，那种代码漏一个就会串数据。
+     */
+    val profileList by vm.profiles.collectAsState()
+    val activeId by vm.activeProfileId.collectAsState()
+    val current = profileList.firstOrNull { it.id == activeId } ?: profileList.firstOrNull()
+
+    var profileName by remember(current?.id) { mutableStateOf(current?.name.orEmpty()) }
+    var apiKey by remember(current?.id) { mutableStateOf(current?.apiKey.orEmpty()) }
+    var baseUrl by remember(current?.id) { mutableStateOf(current?.baseUrl.orEmpty()) }
+    var model by remember(current?.id) { mutableStateOf(current?.model.orEmpty()) }
+    var modelSupportsVision by remember(current?.id) {
+        mutableStateOf(current?.supportsVision ?: false)
+    }
+    var showReasoning by remember(current?.id) { mutableStateOf(current?.showReasoning ?: true) }
+    var temperatureText by remember(current?.id) {
+        mutableStateOf((current?.temperature ?: ModelProfile.DEFAULT_TEMPERATURE).toString())
+    }
+
+    var profileMenuOpen by remember { mutableStateOf(false) }
+    var confirmDeleteProfile by remember { mutableStateOf(false) }
+
     var systemPrompt by remember { mutableStateOf(store.systemPrompt) }
     var showKey by remember { mutableStateOf(false) }
     var testing by remember { mutableStateOf(false) }
+
+    /**
+     * 把编辑框里的内容写回当前档案。
+     *
+     * 地址会被 [BaseUrlHint.normalize] 清洗，所以必须用返回值回显 ——
+     * 否则用户看到的是自己填的 `/v1/chat/completions`，实际生效的却是
+     * 清洗后的域名，下次进来又变一个样。
+     */
+    fun saveDraft(): ModelProfile? {
+        val base = current ?: return null
+        return vm.saveProfile(
+            base.copy(
+                name = profileName.trim(),
+                baseUrl = baseUrl,
+                apiKey = apiKey,
+                model = model,
+                supportsVision = modelSupportsVision,
+                showReasoning = showReasoning,
+                temperature = temperatureText.toDoubleOrNull() ?: base.temperature
+            )
+        )
+    }
 
     // 联网搜索
     var tavilyKey by remember { mutableStateOf(store.tavilyKey) }
@@ -61,8 +109,14 @@ fun SettingsScreen(
 
     // 上下文压缩
     var autoCompress by remember { mutableStateOf(store.autoCompress) }
-    var budgetText by remember { mutableStateOf(store.contextBudget.toString()) }
+    // 预算随档案走，切换档案时跟着换（见上面 current 的说明）
+    var budgetText by remember(current?.id) {
+        mutableStateOf((current?.contextBudget ?: CredentialStore.DEFAULT_CONTEXT_BUDGET).toString())
+    }
     var keepRecentText by remember { mutableStateOf(store.keepRecent.toString()) }
+
+    // 本机 shell（默认关闭；鸿蒙上整块隐藏）
+    var shellEnabled by remember { mutableStateOf(store.shellEnabled) }
 
     // 记忆正文在 IO 线程读，进来时加载一次即可
     LaunchedEffect(Unit) {
@@ -146,7 +200,101 @@ fun SettingsScreen(
 
             HorizontalDivider()
 
-            Text("API 配置", style = MaterialTheme.typography.titleMedium)
+            Text("模型档案", style = MaterialTheme.typography.titleMedium)
+
+            Text(
+                "每份档案是一套独立的后端地址、Key 与参数。切换到哪个档案，" +
+                        "接下来的对话就用哪个模型 —— 对话页点标题也能直接切。",
+                fontSize = 11.sp,
+                lineHeight = 16.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(Modifier.weight(1f)) {
+                    OutlinedButton(
+                        onClick = { profileMenuOpen = true },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = current?.displayName ?: "未配置",
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false),
+                            textAlign = TextAlign.Start
+                        )
+                        Icon(
+                            Icons.Default.KeyboardArrowDown,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                    DropdownMenu(
+                        expanded = profileMenuOpen,
+                        onDismissRequest = { profileMenuOpen = false }
+                    ) {
+                        profileList.forEach { p ->
+                            DropdownMenuItem(
+                                text = {
+                                    Column {
+                                        Text(p.displayName, fontSize = 14.sp)
+                                        Spacer(Modifier.height(2.dp))
+                                        Text(
+                                            p.subtitle,
+                                            fontSize = 11.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                },
+                                trailingIcon = {
+                                    if (p.id == activeId) {
+                                        Icon(
+                                            Icons.Default.Check,
+                                            contentDescription = "当前",
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+                                },
+                                onClick = {
+                                    profileMenuOpen = false
+                                    vm.selectProfile(p.id)
+                                }
+                            )
+                        }
+                    }
+                }
+
+                IconButton(onClick = { vm.createProfile() }) {
+                    Icon(Icons.Default.Add, contentDescription = "新建档案")
+                }
+                IconButton(
+                    onClick = { confirmDeleteProfile = true },
+                    // 只剩一份时不给删：空列表会让「当前档案」无处可退，
+                    // 那些依赖它的地方全得加空判断
+                    enabled = profileList.size > 1
+                ) {
+                    Icon(
+                        Icons.Default.DeleteOutline,
+                        contentDescription = "删除档案",
+                        tint = if (profileList.size > 1) MaterialTheme.colorScheme.onSurfaceVariant
+                        else MaterialTheme.colorScheme.outlineVariant
+                    )
+                }
+            }
+
+            OutlinedTextField(
+                value = profileName,
+                onValueChange = { profileName = it },
+                label = { Text("档案名称（可选）") },
+                placeholder = { Text("比如「写代码」「看图」「本地 Ollama」") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                supportingText = { Text("留空时显示模型名", fontSize = 11.sp) }
+            )
 
             OutlinedTextField(
                 value = apiKey,
@@ -183,7 +331,7 @@ fun SettingsScreen(
                             Text("只填到域名，不要带 /v1/chat/completions", fontSize = 11.sp)
                             Text(
                                 "正确：https://api.deepseek.com\n" +
-                                "错误：https://api.deepseek.com/v1/chat/completions",
+                                        "错误：https://api.deepseek.com/v1/chat/completions",
                                 fontSize = 11.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -192,16 +340,34 @@ fun SettingsScreen(
                 }
             )
 
-            OutlinedTextField(
-                value = model,
-                onValueChange = { model = it },
-                label = { Text("模型名") },
+            Row(
                 modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                supportingText = {
-                    Text("如 deepseek-chat / gpt-4o-mini / qwen-plus", fontSize = 11.sp)
-                }
-            )
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                OutlinedTextField(
+                    value = model,
+                    onValueChange = { model = it },
+                    label = { Text("模型名") },
+                    modifier = Modifier.weight(1.6f),
+                    singleLine = true,
+                    supportingText = { Text("如 deepseek-chat", fontSize = 11.sp) }
+                )
+                OutlinedTextField(
+                    value = temperatureText,
+                    onValueChange = { v ->
+                        // 只收数字和小数点，且最多两位小数 —— 手动挡在这里
+                        // 比弹一个滑杆好：用户可以精确输入 1.0（推理模型常要求）
+                        temperatureText = v.filter { it.isDigit() || it == '.' }
+                            .let { if (it.count { c -> c == '.' } > 1) it.dropLast(1) else it }
+                            .take(4)
+                    },
+                    label = { Text("温度", fontSize = 11.sp) },
+                    modifier = Modifier.weight(1f),
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    supportingText = { Text("0 ~ 2", fontSize = 11.sp) }
+                )
+            }
 
             // 视觉开关。默认关闭是刻意的保守选择：多模态要求把 content 写成数组，
             // 而不支持视觉的后端收到数组会直接报 400。
@@ -219,8 +385,8 @@ fun SettingsScreen(
                         Spacer(Modifier.height(3.dp))
                         Text(
                             "开启后，你发的图片会以 Base64 传给模型。\n" +
-                            "若模型不支持视觉，请保持关闭 —— 此时只发图片的文字说明，" +
-                            "否则部分后端会直接报错。",
+                                    "若模型不支持视觉，请保持关闭 —— 此时只发图片的文字说明，" +
+                                    "否则部分后端会直接报错。",
                             fontSize = 11.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -233,20 +399,48 @@ fun SettingsScreen(
                 }
             }
 
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("显示思考过程", fontSize = 14.sp)
+                        Spacer(Modifier.height(3.dp))
+                        Text(
+                            "推理模型（deepseek-reasoner、Kimi、QwQ 等）会先输出一段内心独白。" +
+                                    "开启后在回答上方显示为可折叠的小块；普通模型没有这个字段，" +
+                                    "开了也不会有内容。",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Spacer(Modifier.width(10.dp))
+                    Switch(
+                        checked = showReasoning,
+                        onCheckedChange = { showReasoning = it }
+                    )
+                }
+            }
+
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
                     onClick = {
                         val hadRedundantPath = BaseUrlHint.hasRedundantPath(baseUrl)
-                        store.apiKey = apiKey
-                        store.baseUrl = baseUrl
-                        store.model = model
-                        store.modelSupportsVision = modelSupportsVision
-                        // 回显清洗后的地址，让用户看到实际生效的值
-                        baseUrl = store.baseUrl
+                        val saved = saveDraft()
+                        // 回显清洗后的值，让用户看到实际生效的地址
+                        saved?.let { baseUrl = it.baseUrl }
                         scope.launch {
                             snackbarHost.showSnackbar(
-                                if (hadRedundantPath) "已保存，地址已自动清理为 ${store.baseUrl}"
-                                else "已保存"
+                                when {
+                                    saved == null -> "没有可保存的档案"
+                                    hadRedundantPath -> "已保存，地址已自动清理为 ${saved.baseUrl}"
+                                    else -> "已保存"
+                                }
                             )
                         }
                     },
@@ -255,11 +449,7 @@ fun SettingsScreen(
 
                 OutlinedButton(
                     onClick = {
-                        store.apiKey = apiKey
-                        store.baseUrl = baseUrl
-                        store.model = model
-                        store.modelSupportsVision = modelSupportsVision
-                        baseUrl = store.baseUrl
+                        saveDraft()
                         testing = true
                         scope.launch {
                             val result = vm.testConnection()
@@ -431,6 +621,73 @@ fun SettingsScreen(
 
             HorizontalDivider()
 
+            /*
+             * ---------------- 本机命令 ----------------
+             *
+             * 鸿蒙上**整块不渲染**。开关摆在那里却永远用不了，比没有这个功能
+             * 更让人困惑 —— 用户会反复点、反复失败，然后以为是 bug。
+             * 检测逻辑见 DeviceEnv，误判方向是「宁可当成鸿蒙」。
+             */
+            if (DeviceEnv.shellAvailable) {
+                Text("本机命令", style = MaterialTheme.typography.titleMedium)
+
+                Text(
+                    "开启后 AI 可以用 `shell` 指令在你手机上执行命令 —— 系统自带的 " +
+                            "`ls`、`grep`、`find`、`sed`、`du`、`stat` 这些，支持管道和重定向。",
+                    fontSize = 12.sp,
+                    lineHeight = 18.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Text(
+                    "⚠️ 命令在你自己的设备上执行，拥有与这个应用相同的权限。" +
+                            "和「代码执行」相反，数据不会离开手机；但删除类命令会真的删掉东西。",
+                    fontSize = 12.sp,
+                    lineHeight = 18.sp,
+                    color = MaterialTheme.colorScheme.error
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("允许执行本机命令", fontSize = 14.sp)
+                        Text(
+                            if (shellEnabled) "已开启 · AI 可以运行 shell 命令"
+                            else "已关闭 · AI 只能用文件读写指令",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = shellEnabled,
+                        onCheckedChange = { checked ->
+                            shellEnabled = checked
+                            store.shellEnabled = checked
+                            // 开关状态会写进系统提示词，变了就得重新生成，
+                            // 否则模型还以为没开
+                            if (!store.hasCustomSystemPrompt) {
+                                systemPrompt = store.systemPrompt
+                            }
+                        }
+                    )
+                }
+
+                Text(
+                    "· 命令在应用沙箱里跑，工作区文件会镜像到沙箱，改过的文件自动同步回去\n" +
+                            "· 没有 python / node / gcc —— 要跑真正的代码请用「代码执行」\n" +
+                            "· 单条命令 30 秒超时，输出超过 8000 字符会截断\n" +
+                            "· 删除类命令（rm -rf、mkfs、pm uninstall 等）会先弹确认框\n" +
+                            "· 碰不到 /sdcard 和其它应用的数据，这是系统限制，不是配置问题",
+                    fontSize = 11.sp,
+                    lineHeight = 16.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                HorizontalDivider()
+            }
+
             // ---------------- 长期记忆 ----------------
             Text("长期记忆", style = MaterialTheme.typography.titleMedium)
 
@@ -569,8 +826,11 @@ fun SettingsScreen(
                     onValueChange = { v ->
                         val digits = v.filter { it.isDigit() }.take(7)
                         budgetText = digits
-                        // 删光时保留旧值，不要因为一次退格就跳到最小值
-                        digits.toIntOrNull()?.let { store.contextBudget = it }
+                        // 删光时保留旧值，不要因为一次退格就跳到最小值。
+                        // 预算随档案存，所以直接写进当前档案
+                        digits.toIntOrNull()?.let { value ->
+                            current?.let { vm.saveProfile(it.copy(contextBudget = value)) }
+                        }
                     },
                     label = { Text("上下文预算", fontSize = 11.sp) },
                     suffix = { Text("token", fontSize = 11.sp) },
@@ -688,6 +948,40 @@ fun SettingsScreen(
             },
             dismissButton = {
                 TextButton(onClick = { confirmClearMemory = false }) { Text("取消") }
+            }
+        )
+    }
+
+    /*
+     * 删档案也要确认。
+     *
+     * 一次误触就是「Key、地址、参数全没了」，而且用户往往记不住那串
+     * API Key 的完整内容 —— 键盘输入框里显示的是圆点，抄不下来。
+     */
+    if (confirmDeleteProfile) {
+        AlertDialog(
+            onDismissRequest = { confirmDeleteProfile = false },
+            title = { Text("删除这份档案？") },
+            text = {
+                Text(
+                    "「${current?.displayName.orEmpty()}」的地址、Key 与参数都会删掉，无法恢复。" +
+                            "已有的对话记录不受影响。"
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmDeleteProfile = false
+                    val id = current?.id
+                    scope.launch {
+                        val ok = id != null && vm.deleteProfile(id)
+                        snackbarHost.showSnackbar(
+                            if (ok) "档案已删除" else "至少要保留一份档案"
+                        )
+                    }
+                }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDeleteProfile = false }) { Text("取消") }
             }
         )
     }

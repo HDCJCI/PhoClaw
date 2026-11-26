@@ -108,7 +108,7 @@ class HeadlessTurnRunner(
         }
         val whitelist = PromptComposer.effectiveWhitelist(activeSkills)
 
-        // 联网搜索、网页抓取、HTTP 请求、代码执行、长期记忆在后台任务里同样可用。
+        // 联网搜索、网页抓取、HTTP 请求、代码执行、本机命令、长期记忆在后台任务里同样可用。
         // 这里的 dispatcher 每次 run 都新建，保证拿到的是当前最新的 Key 与开关状态
         val dispatcher = CommandDispatcher(
             workspace = workspace,
@@ -118,6 +118,11 @@ class HeadlessTurnRunner(
             httpClient = HttpToolClient(),
             codeRunner = CodeRunnerClient(),
             codeExecEnabled = credentials.codeExecEnabled,
+            // 后台任务也能用 shell：定时任务里「每天统计一下工作区有多少代码行」
+            // 这类需求本来就要它。开关与前台共用同一个
+            shellRunner = ShellRunner(app, workspace),
+            shellEnabled = credentials.shellEnabled,
+            shellSupported = DeviceEnv.shellAvailable,
             memory = memoryStore
         )
         var lastAssistantText = ""
@@ -300,10 +305,14 @@ class HeadlessTurnRunner(
             baseUrl = credentials.baseUrl,
             apiKey = credentials.apiKey,
             model = credentials.model,
-            messages = messages
+            messages = messages,
+            temperature = credentials.temperature
         ).collect { event ->
             when (event) {
                 is StreamEvent.Delta -> buffer.append(event.text)
+                // 后台任务没人看思考过程，直接丢弃。不进 buffer，
+                // 免得把一大段内心独白当成回复正文存进会话
+                is StreamEvent.ReasoningDelta -> Unit
                 is StreamEvent.Failed -> {
                     failed = true
                     Log.w(TAG, "流式调用失败：${event.message}")

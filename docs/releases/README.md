@@ -5,8 +5,8 @@
 ```
 docs/releases/
 ├── README.md      ← 你正在看的这份：索引 + 发布流程
-├── v1.9.0.md      ← tag v1.9.0 的 Release 正文，整段粘进 GitHub 即可
-└── v1.8.0.md      ← （待补）
+├── v1.10.0.md     ← tag v1.10.0 的 Release 正文，整段粘进 GitHub 即可
+└── v1.9.0.md      ← （仍在）上一版的正文
 ```
 
 和 `CHANGELOG.md` 的分工：
@@ -22,17 +22,17 @@ Release 正文不复述完整变更列表 —— 那是 CHANGELOG 的活。它�
 
 ## 当前版本
 
-**v1.9.0** · 2026-11-01 · versionCode 18
+**v1.10.0** · 2026-11-26 · versionCode 19
 
-> 长期记忆 `MEMORY.md` + 上下文压缩（滚动摘要）。前者让 AI 跨会话记住偏好，后者让长对话不再撞上后端长度上限。
+> 多模型档案 + 思考过程显示 + 本机 `shell` 指令（鸿蒙自动禁用）。
 
 | 项 | 值 |
 |---|---|
-| 正文 | [`v1.9.0.md`](v1.9.0.md) |
-| 附件 | `PhoClaw-v1.9.0-debug.apk` |
-| 大小 | 19,450,986 字节（18.6 MiB） |
-| MD5 | `fcc635c6d162e483b7432a73f5bdac8d` |
-| SHA-256 | `8241fdeeadbd6b9374a79b59736d9af306f818e43d2bb8f07103880c948839c6` |
+| 正文 | [`v1.10.0.md`](v1.10.0.md) |
+| 附件 | `PhoClaw-v1.10.0-debug.apk` |
+| 大小 | 19,540,524 字节（18.6 MiB） |
+| MD5 | `38095754f3d7bbe8ba67b96cd252cc0a` |
+| SHA-256 | `135e78e69f5912771d9dc2376824dadfe57dff82bdc7989963df26f7ec5e50e6` |
 
 ---
 
@@ -40,7 +40,8 @@ Release 正文不复述完整变更列表 —— 那是 CHANGELOG 的活。它�
 
 | 版本 | 日期 | 主题 | versionCode | 正文 |
 |---|---|---|---|---|
-| **1.9.0** | 2026-11-01 | 长期记忆 + 上下文压缩 | 18 | [v1.9.0.md](v1.9.0.md) |
+| **1.10.0** | 2026-11-26 | 模型档案 + 思考显示 + 本机命令 | 19 | [v1.10.0.md](v1.10.0.md) |
+| 1.9.0 | 2026-11-01 | 长期记忆 + 上下文压缩 | 18 | [v1.9.0.md](v1.9.0.md) |
 | 1.8.0 | 2026-11-01 | 代码执行 + 提示词自动生成 | 17 | — |
 | 1.7.0 | 2026-09-29 | 网页抓取 + HTTP 请求 + 回到底部 | 16 | — |
 | 1.6.8 | 2026-09-27 | 任务列表与图片显示修正 | 15 | — |
@@ -70,8 +71,8 @@ Release 正文不复述完整变更列表 —— 那是 CHANGELOG 的活。它�
 `app/build.gradle.kts`：
 
 ```kotlin
-versionCode = 19          // 只增不减
-versionName = "1.9.1"
+versionCode = 20          // 只增不减
+versionName = "1.10.1"
 ```
 
 ### 2. 编译并核对
@@ -81,19 +82,19 @@ versionName = "1.9.1"
 aapt2 dump badging app/build/outputs/apk/debug/app-debug.apk | head -2
 ```
 
-必须看到 `versionCode='19' versionName='1.9.1'` 再往下走。版本号没改对就打包，是最常见的低级错误。
+必须看到 `versionCode='20' versionName='1.10.1'` 再往下走。版本号没改对就打包，是最常见的低级错误。
 
 ### 3. 改名并算校验值
 
 ```bash
-cp app/build/outputs/apk/debug/app-debug.apk ../PhoClaw-v1.9.1-debug.apk
-md5sum    ../PhoClaw-v1.9.1-debug.apk
-sha256sum ../PhoClaw-v1.9.1-debug.apk
+cp app/build/outputs/apk/debug/app-debug.apk ../PhoClaw-v1.10.1-debug.apk
+md5sum    ../PhoClaw-v1.10.1-debug.apk
+sha256sum ../PhoClaw-v1.10.1-debug.apk
 ```
 
 ### 4. 写正文
 
-新建 `docs/releases/v1.9.1.md`，结构照 `v1.9.0.md`：
+新建 `docs/releases/v1.10.1.md`，结构照 `v1.10.0.md`：
 
 > 一句话摘要 → 亮点（讲清**为什么这么设计**）→ 修了什么 → 安装说明 → 已知限制 → 校验值
 
@@ -104,12 +105,12 @@ sha256sum ../PhoClaw-v1.9.1-debug.apk
 ### 6. 打 tag 并建 Release
 
 ```bash
-git tag -a v1.9.1 -m "v1.9.1"
+git tag -a v1.10.1 -m "v1.10.1"
 git push origin main --tags
 ```
 
-然后在 GitHub 上 **Draft a new release**：选 tag → 标题 `v1.9.1 — 主题` →
-正文粘贴 `v1.9.1.md` 全文 → 附件上传 APK → 发布。
+然后在 GitHub 上 **Draft a new release**：选 tag → 标题 `v1.10.1 — 主题` →
+正文粘贴 `v1.10.1.md` 全文 → 附件上传 APK → 发布。
 
 ### 7. 同步 `CHANGELOG.md`
 
@@ -123,9 +124,9 @@ git push origin main --tags
 
 | 位置 | 什么时候动 |
 |---|---|
-| patch（1.9.**0** → 1.9.**1**） | 修 bug、小调整 |
-| minor（1.**9**.0 → 1.**10**.0） | 新增能力，但老用法不变 |
-| major（**1**.9.0 → **2**.0.0） | 破坏性变更（改了指令格式、删了功能） |
+| patch（1.10.**0** → 1.10.**1**） | 修 bug、小调整 |
+| minor（1.**10**.0 → 1.**11**.0） | 新增能力，但老用法不变 |
+| major（**1**.10.0 → **2**.0.0） | 破坏性变更（改了指令格式、删了功能） |
 
 有一处历史例外：`1.6.8 → 1.7.0` 时 `versionName` **跳过了 1.6.9** 直接进 minor 位，因为那一轮引入了两个全新的联网能力。`versionCode` 是连续的（15 → 16），只是名字跳了。CHANGELOG 开头也记了这件事。
 
@@ -143,9 +144,9 @@ git push origin main --tags
 
 ```json
 {
-  "version": "1.9.0",
+  "version": "1.10.0",
   "file": "app.apk",
-  "label": "PhoClaw-v1.9.0-debug.apk",
+  "label": "PhoClaw-v1.10.0-debug.apk",
   "notes": "一句话说明"
 }
 ```
@@ -160,11 +161,11 @@ Release 正文里写 MD5 和 SHA-256，是因为 APK 走的是 HTTP 下载，没
 
 ```bash
 # Linux / macOS
-md5sum PhoClaw-v1.9.0-debug.apk
-shasum -a 256 PhoClaw-v1.9.0-debug.apk
+md5sum PhoClaw-v1.10.0-debug.apk
+shasum -a 256 PhoClaw-v1.10.0-debug.apk
 
 # Windows PowerShell
-Get-FileHash PhoClaw-v1.9.0-debug.apk -Algorithm SHA256
+Get-FileHash PhoClaw-v1.10.0-debug.apk -Algorithm SHA256
 ```
 
 对不上就别装 —— 要么下载断了，要么中间被换了。

@@ -56,7 +56,21 @@ data class ChatMessage(
 }
 
 sealed interface StreamEvent {
+    /** 正文增量。 */
     data class Delta(val text: String) : StreamEvent
+
+    /**
+     * 思考过程增量（推理模型的 `reasoning_content`）。
+     *
+     * 与 [Delta] 分开而不是拼进正文，原因是两者在界面上的归属完全不同：
+     * 正文是用户要读的答案，思考是「模型怎么想的」的可选旁注，
+     * 混在一起就没法折叠，也没法在切换模型时按档案单独关掉。
+     *
+     * 还需要**回传时不带上**：绝大多数 OpenAI 兼容后端不接受 assistant
+     * 消息里出现 `reasoning_content` 字段，历史消息里带上会直接 400。
+     */
+    data class ReasoningDelta(val text: String) : StreamEvent
+
     data class Failed(val message: String) : StreamEvent
     data object Done : StreamEvent
 }
@@ -122,7 +136,12 @@ class LlmClient {
                                 line.startsWith("data:") -> {
                                     val data = line.removePrefix("data:").trim()
                                     if (data == "[DONE]") break
-                                    parseDelta(data)?.let { trySend(StreamEvent.Delta(it)) }
+                                    parseDelta(data)?.let { delta ->
+                                        // 先吐思考再吐正文：推理模型总是先想后答，
+                                        // 界面上的时间顺序才和真实过程一致
+                                        delta.reasoning?.let { trySend(StreamEvent.ReasoningDelta(it)) }
+                                        delta.content?.let { trySend(StreamEvent.Delta(it)) }
+                                    }
                                 }
                                 line.startsWith(":") -> continue   // SSE 心跳注释
                             }
@@ -271,12 +290,50 @@ class LlmClient {
         return arr
     }
 
-    /** 解析一行 SSE data，取出增量文本。 */
-    private fun parseDelta(data: String): String? = runCatching {
+    /** 一行 SSE data 里拆出来的两部分内容。 */
+    private data class DeltaParts(val content: String?, val reasoning: String?)
+
+    /**
+     * 解析一行 SSE data。
+     *
+     * 思考过程的字段名各家不一致，所以三种都认：
+     * - `reasoning_content` —— DeepSeek-R1、Kimi、Qwen 系
+     * - `reasoning` —— OpenRouter 归一化后的名字（也可能是对象，见下）
+     * - `thinking` —— 部分自建网关的写法
+     *
+     * `reasoning` 在 OpenRouter 上有时是 `{ "content": "..." }` 对象而不是字符串，
+     * 对对象直接 `optString` 会拿到 `"{}"` 这种垃圾，所以按类型分支取。
+     */
+    private fun parseDelta(data: String): DeltaParts? = runCatching {
         val choices = JSONObject(data).optJSONArray("choices") ?: return@runCatching null
-        val delta = choices.optJSONObject(0)?.optJSONObject("delta") ?: return@runCatching null
-        delta.optString("content").takeIf { it.isNotEmpty() }
+        val choice = choices.optJSONObject(0) ?: return@runCatching null
+        // 流式看 delta，非流式兜底看 message（个别网关对 stream=true 也回 message）
+        val node = choice.optJSONObject("delta") ?: choice.optJSONObject("message")
+        ?: return@runCatching null
+
+        val content = node.optString("content").takeIf { it.isNotEmpty() }
+        val reasoning = reasoningOf(node)
+
+        if (content == null && reasoning == null) null else DeltaParts(content, reasoning)
     }.getOrNull()
+
+    /** 从 delta 节点里按三种可能的字段名取思考内容。 */
+    private fun reasoningOf(node: JSONObject): String? {
+        val candidates = listOf("reasoning_content", "reasoning", "thinking")
+        for (key in candidates) {
+            when (val raw = node.opt(key)) {
+                is String -> if (raw.isNotEmpty()) return raw
+                is JSONObject -> {
+                    // OpenRouter 一类会把 reasoning 包成对象
+                    val inner = raw.optString("content")
+                    if (inner.isNotEmpty()) return inner
+                }
+                // null / Boolean / Number 都不是思考文本，跳过
+                else -> Unit
+            }
+        }
+        return null
+    }
 
     /** 把 HTTP 失败响应整理成一条可读的错误信息。 */
     private fun describeHttp(code: Int, message: String, body: String): String {

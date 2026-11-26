@@ -14,8 +14,10 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.*
@@ -33,6 +35,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.phoclaw.chat.data.ModelProfile
 import com.phoclaw.chat.data.PendingAttachment
 import com.phoclaw.chat.ui.MarkdownText
 import kotlinx.coroutines.Dispatchers
@@ -51,6 +54,12 @@ fun ChatScreen(
     val listState = rememberLazyListState()
     val snackbarHost = remember { SnackbarHostState() }
     var menuOpen by remember { mutableStateOf(false) }
+    var profileSheetOpen by remember { mutableStateOf(false) }
+
+    // 模型档案。切换档案 = 切换后端 + 模型 + 全部相关参数
+    val profiles by vm.profiles.collectAsState()
+    val activeProfileId by vm.activeProfileId.collectAsState()
+    val activeProfile = profiles.firstOrNull { it.id == activeProfileId } ?: profiles.firstOrNull()
 
     // 目录选择器：打开系统 SAF，让用户挑一个工作区目录
     val picker = rememberLauncherForActivityResult(
@@ -141,18 +150,59 @@ fun ChatScreen(
         )
     }
 
+    // 模型切换弹层。放在 Scaffold 之前：ModalBottomSheet 自己是一个窗口，
+    // 组合位置不影响它盖在谁上面
+    if (profileSheetOpen) {
+        ModelProfileSheet(
+            profiles = profiles,
+            activeId = activeProfileId,
+            onSelect = { id ->
+                vm.selectProfile(id)
+                profileSheetOpen = false
+            },
+            onManage = {
+                profileSheetOpen = false
+                onOpenSettings()
+            },
+            onDismiss = { profileSheetOpen = false }
+        )
+    }
+
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHost) },
         topBar = {
             TopAppBar(
                 title = {
-                    Column {
-                        Text("PhoClaw", fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
+                    /*
+                     * 标题整块可点 = 切换模型。
+                     *
+                     * 没有另加一个图标：顶栏已经有历史、新会话、更多三个按钮，
+                     * 再塞第四个会让每个都变小、都更难点。而「点标题换模型」
+                     * 是个很自然的动作 —— 副标题上那个小箭头就是提示。
+                     */
+                    Column(
+                        modifier = Modifier.clickable(enabled = !state.isStreaming) {
+                            profileSheetOpen = true
+                        }
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("PhoClaw", fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
+                            Icon(
+                                imageVector = Icons.Default.KeyboardArrowDown,
+                                contentDescription = "切换模型",
+                                modifier = Modifier.size(18.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                         Text(
-                            text = when {
-                                !state.workspaceReady -> "未选择工作区"
-                                else -> state.workspaceName ?: "工作区"
-                            },
+                            // 副标题给三样东西：哪个模型、哪个工作区。
+                            // 模型名放前面 —— 「我现在在跟谁说话」比
+                            // 「文件写到哪里」更常需要确认
+                            text = listOfNotNull(
+                                activeProfile?.model?.takeIf { it.isNotBlank() } ?: "未配置模型",
+                                if (state.workspaceReady) state.workspaceName ?: "工作区"
+                                else "未选择工作区"
+                            ).joinToString(" · "),
                             fontSize = 12.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
@@ -254,9 +304,11 @@ fun ChatScreen(
                         item { CompressionNotice(state.summarizedCount) }
                     }
                     // 内部消息（工具结果回灌、附件内容注入）不渲染气泡，
-                    // 但其挂载的工具日志要展示
+                    // 但其挂载的工具日志要展示；思考过程同理 —— 有思考就要让人看见
                     items(state.messages) { msg ->
-                        if (msg.isInternal && msg.toolLog.isEmpty()) return@items
+                        if (msg.isInternal && msg.toolLog.isEmpty() && msg.reasoning.isBlank()) {
+                            return@items
+                        }
                         MessageBubble(msg, attachmentFile = vm::attachmentFile)
                     }
                 }
@@ -416,6 +468,165 @@ private fun EmptyHint(hasWorkspace: Boolean) {
     }
 }
 
+/**
+ * 底部弹层：选模型。
+ *
+ * 为什么是弹层而不是下拉菜单：档案有三行信息（名字、模型名、后端），
+ * 下拉菜单一行放不下，而且手指在屏幕下半部分时够不到顶部菜单。
+ *
+ * 这里只做「选」，「改」交给设置页 —— 同一个地方既选又编辑，
+ * 用户很容易在只是想切一下的时候误改到配置。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ModelProfileSheet(
+    profiles: List<ModelProfile>,
+    activeId: String,
+    onSelect: (String) -> Unit,
+    onManage: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .padding(start = 20.dp, end = 20.dp, bottom = 20.dp)
+        ) {
+            Text("选择模型", style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.height(3.dp))
+            Text(
+                "每份档案对应一套独立的后端地址、Key 与参数",
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(10.dp))
+
+            profiles.forEach { profile ->
+                val selected = profile.id == activeId
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .clickable { onSelect(profile.id) }
+                        .padding(horizontal = 10.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            text = profile.displayName,
+                            fontSize = 14.sp,
+                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Spacer(Modifier.height(2.dp))
+                        Text(
+                            text = profile.subtitle,
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    if (selected) {
+                        Icon(
+                            imageVector = Icons.Default.Check,
+                            contentDescription = "当前使用",
+                            modifier = Modifier.size(18.dp),
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(6.dp))
+            HorizontalDivider()
+            OutlinedButton(
+                onClick = onManage,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 12.dp)
+            ) {
+                Icon(Icons.Default.Settings, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("管理档案")
+            }
+        }
+    }
+}
+
+/**
+ * 思考过程折叠块。
+ *
+ * 推理模型（DeepSeek-R1、Kimi、QwQ 等）在正式回答前会先吐一大段「内心独白」。
+ * 这些内容对调试提示词、判断模型有没有跑偏很有用，但对只想看答案的人来说
+ * 是噪音 —— 所以默认**流式时展开、结束后由用户自己收**。
+ *
+ * 展开后限高 + 内部滚动：一次思考两三千字很常见，不限高的话一条消息
+ * 就能把整个列表撑到需要翻好几屏，正文反而被挤没了。
+ */
+@Composable
+private fun ReasoningBlock(text: String, streaming: Boolean) {
+    // 无 key 的 remember：只在首次组合时取一次初值。
+    // 这样流式过程中用户手动收起后，后续增量不会把它又弹开
+    var expanded by remember { mutableStateOf(streaming) }
+    val scroll = rememberScrollState()
+
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+        shape = RoundedCornerShape(10.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
+        modifier = Modifier.widthIn(max = 360.dp)
+    ) {
+        Column(Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { expanded = !expanded }
+            ) {
+                Icon(
+                    imageVector = if (expanded) Icons.Default.KeyboardArrowDown
+                    else Icons.Default.KeyboardArrowRight,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.width(4.dp))
+                Text(
+                    text = if (streaming) "正在思考…" else "思考过程",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    text = "· ${text.length} 字",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                )
+            }
+
+            if (expanded) {
+                Spacer(Modifier.height(6.dp))
+                HorizontalDivider(
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = text.trim(),
+                    fontSize = 12.sp,
+                    lineHeight = 18.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .heightIn(max = 260.dp)
+                        .verticalScroll(scroll)
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun MessageBubble(msg: UiMessage, attachmentFile: (String) -> File) {
     val isUser = msg.role == "user"
@@ -429,6 +640,14 @@ private fun MessageBubble(msg: UiMessage, attachmentFile: (String) -> File) {
     val align = if (isUser) Alignment.End else Alignment.Start
 
     Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = align) {
+        // 思考过程放在气泡**上方**而不是里面：它是「模型怎么想的」，
+        // 和「模型答了什么」是两件事。混在同一个气泡里会让正文退到
+        // 一大段灰字的后面，反而更难读
+        if (!isUser && msg.reasoning.isNotBlank()) {
+            ReasoningBlock(text = msg.reasoning, streaming = msg.isStreaming)
+            Spacer(Modifier.height(6.dp))
+        }
+
         // 用 hasContent 而不是 text.isNotBlank()：
         // 只发了图片没打字的消息，text 是空串但必须渲染出来
         if (msg.hasContent) {
