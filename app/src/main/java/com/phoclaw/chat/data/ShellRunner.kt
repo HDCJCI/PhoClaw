@@ -76,6 +76,10 @@ class ShellRunner(
             val dir = if (workspace.isReady) workDir else homeDir
             dir.mkdirs()
 
+            // ⓪ 沙箱体积兜底。命令可以写任意大的文件（`yes > big.txt`），
+            // 不清的话攒到把手机存储占满，用户只会看到「空间不足」而不知道是谁干的
+            pruneSandbox(dir)
+
             // ① 工作区 → 沙箱
             val stamps = if (workspace.isReady) mirrorIn(dir) else emptyMap()
 
@@ -210,6 +214,23 @@ class ShellRunner(
     // ---------------------------------------------------------------- 镜像同步
 
     /**
+     * 沙箱超限时清空工作目录。
+     *
+     * 只清 `work`，不动 `home` —— 没有工作区时用户可能在里面放了他自己
+     * 想留住的东西。而 `work` 本身是工作区的镜像，清掉下一轮会重新同步。
+     */
+    private fun pruneSandbox(dir: File) {
+        if (dir != workDir) return
+        val total = runCatching {
+            dir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+        }.getOrDefault(0L)
+        if (total > MAX_SANDBOX_BYTES) {
+            runCatching { dir.deleteRecursively() }
+            dir.mkdirs()
+        }
+    }
+
+    /**
      * 工作区 → 沙箱。
      *
      * 返回「相对路径 → 写入后的本地修改时间」，供 [mirrorOut] 判断哪些文件
@@ -229,6 +250,10 @@ class ShellRunner(
                 val rel = if (path == "." || path.isBlank()) name else "$path/$name"
                 val dest = File(target, name)
                 if (isDir) {
+                    // 构建产物和依赖目录不进沙箱：几百上千个文件能把遍历
+                    // 拖到几十秒（每次 list 都是一次 binder 调用），而且
+                    // 命令基本不会需要它们
+                    if (name.lowercase() in SKIP_DIRS) continue
                     if (dest.mkdirs() || dest.isDirectory) walk(rel, dest, depth + 1)
                     continue
                 }
@@ -291,6 +316,21 @@ class ShellRunner(
         private const val MAX_MIRROR_BYTES = 6L * 1024 * 1024
         private const val MAX_MIRROR_FILE_BYTES = 512L * 1024
         private const val MAX_DEPTH = 6
+
+        /** 沙箱总体积上限。超过就在下次执行前清空重建。 */
+        private const val MAX_SANDBOX_BYTES = 64L * 1024 * 1024
+
+        /**
+         * 不镜像的目录名。
+         *
+         * 这些目录的共同点是「文件多、体积大、命令用不上」。全量遍历它们
+         * 会让每次执行多花十几秒（SAF 的每次 list 都是一次 binder 调用）。
+         * 真要读里面的东西，模型可以直接用 `read` 指令。
+         */
+        private val SKIP_DIRS = setOf(
+            ".git", ".gradle", ".idea", "node_modules", "build", "dist",
+            "out", "__pycache__", ".venv", "venv", "target", ".next", ".nuxt"
+        )
 
         /**
          * 需要用户确认的命令模式。
