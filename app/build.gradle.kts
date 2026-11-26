@@ -12,8 +12,8 @@ android {
         applicationId = "com.phoclaw.chat"
         minSdk = 26
         targetSdk = 34
-        versionCode = 21
-        versionName = "1.11.1"
+        versionCode = 22
+        versionName = "1.11.2"
     }
 
     buildTypes {

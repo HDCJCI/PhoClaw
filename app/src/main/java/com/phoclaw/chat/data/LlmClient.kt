@@ -1,5 +1,6 @@
 package com.phoclaw.chat.data
 
+import com.phoclaw.chat.util.BaseUrlHint
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
@@ -110,7 +111,7 @@ class LlmClient {
         val call = client.newCall(request)
         call.enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
-                trySend(StreamEvent.Failed(describe(e)))
+                trySend(StreamEvent.Failed(describe(e, url)))
                 close()
             }
 
@@ -148,7 +149,7 @@ class LlmClient {
                         }
                         trySend(StreamEvent.Done)
                     } catch (e: IOException) {
-                        trySend(StreamEvent.Failed(describe(e)))
+                        trySend(StreamEvent.Failed(describe(e, url)))
                     } finally {
                         close()
                     }
@@ -176,8 +177,8 @@ class LlmClient {
         temperature: Double = 0.3,
         maxTokens: Int? = null
     ): Result<String> = withContext(Dispatchers.IO) {
+        val url = "${baseUrl.trimEnd('/')}/v1/chat/completions"
         runCatching {
-            val url = "${baseUrl.trimEnd('/')}/v1/chat/completions"
             val payload = buildPayload(
                 model, messages, stream = false,
                 temperature = temperature, maxTokens = maxTokens
@@ -191,7 +192,7 @@ class LlmClient {
                     .optJSONArray("choices")?.optJSONObject(0)
                     ?.optJSONObject("message")?.optString("content").orEmpty()
             }
-        }
+        }.recoverCatching { throw translate(it, url) }
     }
 
     /** 非流式调用，用于「测试连接」。 */
@@ -200,8 +201,8 @@ class LlmClient {
         apiKey: String,
         model: String
     ): Result<String> = withContext(Dispatchers.IO) {
+        val url = "${baseUrl.trimEnd('/')}/v1/chat/completions"
         runCatching {
-            val url = "${baseUrl.trimEnd('/')}/v1/chat/completions"
             val payload = buildPayload(
                 model,
                 listOf(ChatMessage(ChatMessage.ROLE_USER, "ping")),
@@ -216,7 +217,7 @@ class LlmClient {
                     ?.optJSONObject("message")?.optString("content").orEmpty()
                 text.ifBlank { "连接成功，但模型返回为空" }
             }
-        }
+        }.recoverCatching { throw translate(it, url) }
     }
 
     // ---------------------------------------------------------------- 内部实现
@@ -375,11 +376,84 @@ class LlmClient {
         return "提示：当前后端可能不接受多模态数组格式。请在「设置」里关闭「模型支持看图」后重试。"
     }
 
-    private fun describe(e: IOException): String = when (e) {
-        is java.net.UnknownHostException -> "无法解析域名，请检查 Base URL 和网络：${e.message}"
-        is java.net.SocketTimeoutException -> "连接超时：${e.message}"
-        is javax.net.ssl.SSLException -> "TLS 握手失败：${e.message}"
-        else -> e.message ?: e.toString()
+    /**
+     * 把异常换成一条人话 message，原始异常挂到 cause 上。
+     *
+     * HTTP 状态码类的异常（message 以 `HTTP ` 开头）已经由 [describeHttp]
+     * 整理过，不能再套一层，否则会变成「连不上 xxx。HTTP 401 …」。
+     */
+    private fun translate(e: Throwable, url: String): Throwable {
+        if (e !is IOException) return e
+        if (e.message?.startsWith("HTTP ") == true) return e
+        return IOException(describe(e, url), e)
+    }
+
+    /**
+     * 把网络异常翻译成人能读懂的话。
+     *
+     * 直接抛 `e.message` 是最省事也最没用的做法 —— 用户截图里那句
+     * `Failed to connect to /127.0.0.1:8443` 就是原文，除了让人确定
+     * 「确实连不上」之外没有任何信息：不知道是地址问题、服务没开、
+     * 还是自己填错了协议。这里按最常见的三种原因分别给出下一步。
+     *
+     * @param url 完整请求地址，用来从里面抠出主机和端口
+     */
+    private fun describe(e: IOException, url: String = ""): String {
+        val host = BaseUrlHint.hostOf(url)
+        val port = BaseUrlHint.portOf(url)
+        val target = when {
+            host.isBlank() -> "服务器"
+            port.isBlank() -> host
+            else -> "$host:$port"
+        }
+
+        return when (e) {
+            is java.net.UnknownHostException ->
+                "找不到 $target 这个地址。\n" +
+                        "检查域名拼写，或者手机当前网络能不能解析它（公司网络、校园网经常拦）。"
+
+            is java.net.SocketTimeoutException ->
+                "连接 $target 超时。\n" +
+                        "如果地址是内网 IP，确认手机和电脑在同一个 Wi-Fi。"
+
+            is java.net.ConnectException -> buildString {
+                append("连不上 $target。\n")
+                when {
+                    BaseUrlHint.isLoopback(host) ->
+                        append(
+                            "127.0.0.1 / localhost 在手机上指的是「手机自己」，" +
+                                    "不是你的电脑。要连电脑上的服务，请填电脑的局域网 IP" +
+                                    "（在电脑上执行 ipconfig / ifconfig 查，形如 192.168.1.5）。"
+                        )
+                    BaseUrlHint.isPrivateHost(host) ->
+                        append(
+                            "三件事逐一确认：\n" +
+                                    "1. 电脑上的服务已启动，端口没写错\n" +
+                                    "2. 服务监听的是 0.0.0.0 而不是 127.0.0.1（只监听本机时外部连不进来）\n" +
+                                    "3. 电脑防火墙放行了这个端口，手机和电脑在同一个 Wi-Fi"
+                        )
+                    else ->
+                        append("确认地址、端口没写错，以及手机能正常上网。")
+                }
+            }
+
+            is javax.net.ssl.SSLException -> buildString {
+                // 最常见的两种：往明文端口发 https 请求，或证书不被信任
+                append("TLS 握手失败（$target）。\n")
+                if (e.message?.contains("Unrecognized SSL message", true) == true ||
+                    e.message?.contains("plaintext", true) == true
+                ) {
+                    append("这个端口像是明文 HTTP 服务，把地址改成 http:// 开头试试。")
+                } else {
+                    append(
+                        "如果后端是自建的、用了自签名证书，系统不认 —— " +
+                                "换成正式证书，或先用 http://（仅限局域网）。"
+                    )
+                }
+            }
+
+            else -> e.message ?: e.toString()
+        }
     }
 
     private companion object {

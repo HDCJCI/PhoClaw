@@ -2,7 +2,7 @@
 
 An Android app that runs on your phone, holds a conversation, and reads/writes files in your workspace directly.(Just software made out of boredom)
 
-**Current version: v1.11.1** (versionCode 21)
+**Current version: v1.11.2** (versionCode 22)
 
 [中文文档](README.md) · **English** · [Changelog](CHANGELOG.md) · [Downloads](https://github.com/HDCJCI/PhoClaw/releases)
 
@@ -16,14 +16,14 @@ An Android app that runs on your phone, holds a conversation, and reads/writes f
 
 ## Version history
 
-Only the last three versions are listed here. The full record — 21 versions, split into
+Only the last three versions are listed here. The full record — 22 versions, split into
 Added / Fixed / Changed — lives in **[CHANGELOG.md](CHANGELOG.md)** (Chinese).
 
 | Version | versionCode | Changes |
 |---|---|---|
-| **1.11.1** | 21 | **Custom prompts no longer freeze the tool section.** Only the user's own part (role, tone, conventions) is stored; the tool list, examples and rules are regenerated on every request and appended at the end, so adding a command never forces you to re-paste the docs. Existing custom prompts are split at `## 指令格式` on first read, keeping just the part you actually wrote |
+| **1.11.2** | 22 | **Cleartext HTTP and readable network errors.** `usesCleartextTraffic` replaced by a network security config, so LAN backends like `http://192.168.x.x:8080` can finally connect (trust anchors still system-only, so an installed packet-sniffing CA can't read your key); `ConnectException` is translated instead of dumped raw — loopback addresses say outright that 127.0.0.1 means the phone itself, LAN addresses list the three things to check; bare hosts get `http://` for private ranges and `https://` for public ones |
+| 1.11.1 | 21 | **Custom prompts no longer freeze the tool section.** Only the user's own part (role, tone, conventions) is stored; the tool list, examples and rules are regenerated on every request and appended at the end, so adding a command never forces you to re-paste the docs. Existing custom prompts are split at `## 指令格式` on first read, keeping just the part you actually wrote |
 | 1.11.0 | 20 | **Settings split into a two-level menu.** The home screen keeps six entries (workspace card, then model & connection / context compression / system prompt / tools & permissions / long-term memory / about), each with a one-line status summary — the current backend, which tools are on — so you don't have to open a sub-page to check. Save moved to a pinned bottom bar; the model and memory pages flush on exit so switching pages no longer drops a half-typed key. New "About → where your data goes" list |
-| 1.10.0 | 19 | **Model profiles + reasoning display + local shell.** Each profile carries its own base URL / key / model / vision flag / reasoning flag / context budget / temperature, switchable from the chat title bar, with the old single config migrated automatically. Reasoning output (`reasoning_content`) renders as a collapsible block above the answer and is never sent back to the API. `shell` runs system commands on the phone (workspace mirrored in and out, destructive commands need confirmation) and is hidden entirely on HarmonyOS |
 
 ## What it is
 
@@ -677,9 +677,19 @@ correctly.
 | Alibaba Qwen | `https://dashscope.aliyuncs.com/compatible-mode` | `qwen-plus` |
 | Moonshot | `https://api.moonshot.cn` | `moonshot-v1-8k` |
 
-For a local Ollama, set the Base URL to `http://<your-ip>:11434` and change
-`android:usesCleartextTraffic` to `true` in `AndroidManifest.xml` (plain HTTP needs it; keep it
-`false` for public services).
+### Connecting to a self-hosted backend on your LAN
+
+Ollama, llama.cpp, one-api and LiteLLM all default to plain HTTP. Cleartext is allowed — **no manifest edit needed**. Just enter `http://<laptop-lan-ip>:11434`.
+
+Three things to check:
+
+1. **Don't enter `127.0.0.1`** — on a phone that means the phone itself, not your computer. Use the computer's LAN IP (`ipconfig` on Windows, `ifconfig` on macOS/Linux).
+2. **The service must listen on `0.0.0.0`**, not `127.0.0.1`; otherwise nothing outside can reach it.
+3. **Same Wi-Fi**, with the port allowed through the computer's firewall.
+
+When it fails, the error message names the specific link that broke.
+
+> Use `https://` for public endpoints. `http://` works but sends your key and messages in cleartext — the field shows a red warning when you type one.
 
 ---
 

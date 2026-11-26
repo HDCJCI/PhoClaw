@@ -297,13 +297,27 @@ internal fun ModelSettingsPage(
             label = { Text("Base URL") },
             modifier = Modifier.fillMaxWidth(),
             singleLine = true,
-            isError = BaseUrlHint.isFullEndpoint(baseUrl),
+            isError = BaseUrlHint.isFullEndpoint(baseUrl) || BaseUrlHint.note(baseUrl)?.severe == true,
             supportingText = {
+                //  三种提示可以叠加显示：粘了完整接口地址、地址指向本机、
+                //  公网却用了 http。原来只认第一种，另外两种要么静默通过，
+                //  要么等到发消息时才炸一句英文。
                 val warn = BaseUrlHint.warning(baseUrl)
-                if (warn != null) {
-                    Text(warn, fontSize = 11.sp, color = MaterialTheme.colorScheme.error)
-                } else {
-                    Column {
+                val note = BaseUrlHint.note(baseUrl)
+                Column {
+                    if (warn != null) {
+                        Text(warn, fontSize = 11.sp, color = MaterialTheme.colorScheme.error)
+                    }
+                    if (note != null) {
+                        Text(
+                            note.text,
+                            fontSize = 11.sp,
+                            lineHeight = 16.sp,
+                            color = if (note.severe) MaterialTheme.colorScheme.error
+                            else MaterialTheme.colorScheme.tertiary
+                        )
+                    }
+                    if (warn == null && note == null) {
                         Text("只填到域名，不要带 /v1/chat/completions", fontSize = 11.sp)
                         Text(
                             "正确：https://api.deepseek.com\n" +

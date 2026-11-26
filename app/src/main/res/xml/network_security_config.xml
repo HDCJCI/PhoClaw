@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  明文 HTTP 策略。
+
+  这个应用唯一的出站流量就是「用户自己填的 API 地址」，而本地与局域网
+  自建后端（Ollama、llama.cpp、one-api、LiteLLM、各种中转）绝大多数是
+  http。全局禁掉明文的话这些后端一律连不上，且报错是 OkHttp 的
+  "CLEARTEXT communication not permitted by network security policy" ——
+  字面上完全看不出是协议问题。
+
+  所以放开明文，把判断交给用户：设置页会对 http 开头的**公网**地址显示
+  醒目警告（Key 与对话内容会明文过网），本机与局域网地址不警告。
+
+  trust-anchors 只留 system 是刻意的：不信用户安装的 CA。否则任何装了
+  抓包证书的设备都能解开 TLS 直接读 API Key。真需要抓包调试时自己临时
+  往这里加 <certificates src="user" />，别提交上来。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
