@@ -18,8 +18,17 @@ package com.phoclaw.chat.util
  */
 object LineDiff {
 
-    /** 单侧行数上限。超过就走退化路径。 */
-    const val MAX_LINES = 2000
+    /**
+     * 单侧行数上限。超过就走退化路径。
+     *
+     * 定成 800 而不是更大的值，是因为这个计算发生在**主线程**的
+     * `remember` 里（界面要立刻拿到结果）。LCS 是 O(n·m)：800 行是 64 万次
+     * 比较，手机上半毫秒级；2000 行就是 400 万次，一轮改三个文件能明显掉帧。
+     *
+     * 800 行已经覆盖了绝大多数源码文件（超过的基本是生成物、日志或数据），
+     * 而这类文件本来也没人会逐行看 diff。
+     */
+    const val MAX_LINES = 800
 
     enum class Kind { SAME, ADD, DEL }
 

@@ -31,9 +31,9 @@ Release 正文不复述完整变更列表 —— 那是 CHANGELOG 的活。它�
 |---|---|
 | 正文 | [`v1.12.0.md`](v1.12.0.md) |
 | 附件 | `PhoClaw-v1.12.0-debug.apk` |
-| 大小 | 19,477,332 字节（18.6 MiB） |
-| MD5 | `4b39f5ac5661725cf868fc307fecc828` |
-| SHA-256 | `2e4584dff907ce65a24763d280120d21bb6a3fc0747e64e410e9749a6de61ba5` |
+| 大小 | 19,552,525 字节（18.7 MiB） |
+| MD5 | `0c46bc718a6019592c5cf61e40eb0a0f` |
+| SHA-256 | `749703c9c93fdabd0cba449fc3704a61f792bfd4153a29bf51cc9edbe55028b2` |
 
 ---
 
