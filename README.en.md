@@ -2,7 +2,7 @@
 
 An Android app that runs on your phone, holds a conversation, and reads/writes files in your workspace directly.(Just software made out of boredom)
 
-**Current version: v1.12.0** (versionCode 24)
+**Current version: v2.0.0** (versionCode 25)
 
 [中文文档](README.md) · **English** · [Changelog](CHANGELOG.md) · [Downloads](https://github.com/HDCJCI/PhoClaw/releases)
 
@@ -21,7 +21,7 @@ Added / Fixed / Changed — lives in **[CHANGELOG.md](CHANGELOG.md)** (Chinese).
 
 | Version | versionCode | Changes |
 |---|---|---|
-| **1.12.0** | 24 | **Edit a few lines, send only those lines.** New `edit` command (`--- find` / `--- replace` blocks, with a hard uniqueness requirement and indent tolerance); each turn's file changes appear as a red/green diff card that can be **undone in one tap**; syntax highlighting for 20+ languages with zero new dependencies; a persistent context meter above the input box; conversations exportable to Markdown |
+| **2.0.0** | 25 | **Edit a few lines, send only those lines.** New `edit` command (`--- find` / `--- replace` blocks, with a hard uniqueness requirement and indent tolerance); each turn's file changes appear as a red/green diff card that can be **undone in one tap**; syntax highlighting for 20+ languages with zero new dependencies; a persistent context meter above the input box; conversations exportable to Markdown |
 | 1.11.3 | 23 | **Streaming Markdown.** Headings, lists, code blocks and tables are rendered while the answer is still being written, sampled every 90ms instead of reflowing on every token (0.83ms per parse at 3,500 chars). Also fixes three scrolling bugs: long answers no longer get yanked back to their first line, the scroll index no longer goes wrong when a compression notice is present, and scrolling no longer restarts an animation per token. Scrolling up pauses auto-follow; sending a message resumes it |
 | 1.11.2 | 22 | **Cleartext HTTP and readable network errors.** `usesCleartextTraffic` replaced by a network security config, so LAN backends like `http://192.168.x.x:8080` can finally connect (trust anchors still system-only, so an installed packet-sniffing CA can't read your key); `ConnectException` is translated instead of dumped raw — loopback addresses say outright that 127.0.0.1 means the phone itself, LAN addresses list the three things to check; bare hosts get `http://` for private ranges and `https://` for public ones |
 
