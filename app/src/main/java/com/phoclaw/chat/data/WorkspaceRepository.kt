@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import android.provider.DocumentsContract
 import androidx.documentfile.provider.DocumentFile
+import com.phoclaw.chat.util.TextPatch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.FileNotFoundException
@@ -107,6 +108,29 @@ class WorkspaceRepository(private val context: Context) {
             requireNotNull(input) { "无法打开文件：$path" }
             input.bufferedReader().readText()
         }
+    }
+
+    /**
+     * 读文件，读不到就返回 null（不抛异常）。
+     *
+     * 给「变更记录」用：备份原文时，目录、二进制、超大文件都只意味着
+     * 「这次没法备份」，不该让整条指令失败 —— 用户要的是文件被改好，
+     * 不是被一个备份问题挡住。
+     */
+    suspend fun readTextOrNull(path: String, maxBytes: Long = MAX_TEXT_BYTES): String? =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val file = resolve(path) ?: return@runCatching null
+                if (file.isDirectory || file.length() > maxBytes) return@runCatching null
+                context.contentResolver.openInputStream(file.uri)?.use { input ->
+                    input.bufferedReader().readText()
+                }
+            }.getOrNull()
+        }
+
+    /** 路径是否存在（文件或目录都算）。 */
+    suspend fun exists(path: String): Boolean = withContext(Dispatchers.IO) {
+        runCatching { resolve(path) != null }.getOrDefault(false)
     }
 
     /** 文件详情：大小、类型、修改时间。 */
@@ -294,6 +318,101 @@ class WorkspaceRepository(private val context: Context) {
         val after = DocumentFile.fromSingleUri(context, target.uri)?.length() ?: target.length()
         "已追加内容到 $cleaned（${humanSize(before)} → ${humanSize(after)}）"
     }
+
+    // ---------------------------------------------------------------- 精确替换
+
+    /**
+     * 把文件里的 [find] 换成 [replace]，要求 [find] 在全文里**只出现一次**。
+     *
+     * ## 为什么要「唯一」这个硬约束
+     *
+     * 让模型改写代码时，它给的那几行往往不是全文唯一的 —— `    }` 在任何一个
+     * Kotlin 文件里都有几十处。如果按「第一处匹配」去替换，会出现一种最糟糕的
+     * 失败：**操作成功了、日志说改好了、改的却是别的地方**。用户要等到运行
+     * 报错才发现，而且很难定位是哪一次编辑搞的。
+     *
+     * 所以匹配到 0 处或 3 处都直接拒绝，把「有几处、大概在哪些行」告诉模型，
+     * 让它带上更多上下文重来。宁可多一轮，不要改错。
+     *
+     * 判定逻辑在 [TextPatch] 里（纯函数、有测试），这里只负责读写。
+     */
+    suspend fun editText(path: String, find: String, replace: String): String = withContext(Dispatchers.IO) {
+        val cleaned = sanitize(path)
+        require(cleaned.isNotEmpty()) { "请指定文件路径" }
+        require(find.isNotEmpty()) { "查找内容为空，无法定位" }
+
+        val file = resolve(cleaned) ?: throw FileNotFoundException("文件不存在：$cleaned")
+        if (file.isDirectory) throw IllegalArgumentException("这是一个目录，不是文件：$cleaned")
+        if (file.length() > MAX_TEXT_BYTES) {
+            throw IllegalArgumentException(
+                "文件过大（${humanSize(file.length())}），超过 ${humanSize(MAX_TEXT_BYTES)} 上限，" +
+                        "无法精确替换。请改用 write 重写，或用 shell 处理"
+            )
+        }
+
+        val original = context.contentResolver.openInputStream(file.uri).use { input ->
+            requireNotNull(input) { "无法打开文件：$cleaned" }
+            input.bufferedReader().readText()
+        }
+
+        val result = TextPatch.apply(original, find, replace)
+        if (!result.ok) return@withContext "未执行修改：${result.error}"
+
+        val updated = result.updated!!
+        writeRaw(cleaned, updated)
+
+        val where = if (result.fuzzy) "第 ${result.line} 行（缩进容错匹配）" else "第 ${result.line} 行"
+        buildString {
+            appendLine(
+                "已修改 $cleaned（$where，${find.lines().size} 行 → ${replace.lines().size} 行）"
+            )
+            appendLine("--- 修改后上下文 ---")
+            append(excerpt(updated, replace.lines().firstOrNull().orEmpty(), context = 2))
+        }
+    }
+
+    /**
+     * 按行重写整个文件的内容。给撤销用 —— 与 [writeText] 的区别是不做目录创建的
+     * 额外提示，语义就是「把这坨内容放回去」。
+     */
+    suspend fun overwrite(path: String, content: String): String {
+        writeRaw(sanitize(path).ifEmpty { throw IllegalArgumentException("请指定文件路径") }, content)
+        return "已恢复 $path"
+    }
+
+    /** 把内容整份写进 [cleaned] 指向的文件，不存在就建。写操作的公共尾部。 */
+    private fun writeRaw(cleaned: String, content: String) {
+        val segments = cleaned.split('/')
+        val fileName = segments.last()
+        val parentPath = segments.dropLast(1).joinToString("/")
+        val parent = if (parentPath.isEmpty()) root()
+        else resolve(parentPath, createDirectories = true)
+            ?: throw FileNotFoundException("无法创建目录：$parentPath")
+
+        val existing = findChild(parent, fileName)
+        val target = when {
+            existing == null -> createFileExact(parent, fileName)
+                ?: throw FileNotFoundException("无法创建文件：$cleaned")
+            existing.isDirectory -> throw IllegalArgumentException("同名目录已存在：$cleaned")
+            else -> existing
+        }
+        context.contentResolver.openOutputStream(target.uri, "wt").use { output ->
+            requireNotNull(output) { "无法以写入模式打开：$cleaned" }
+            output.bufferedWriter().use { it.write(content) }
+        }
+    }
+
+    /** 取包含 [find] 的那一行前后各 [context] 行，作为回执给模型看。 */
+    private fun excerpt(text: String, find: String, context: Int = 2, maxChars: Int = 1200): String {
+        val lines = text.split('\n')
+        val anchor = if (find.isBlank()) 0
+        else lines.indexOfFirst { it.contains(find.trim()) }.let { if (it < 0) 0 else it }
+        val from = maxOf(0, anchor - context)
+        val to = minOf(lines.lastIndex, anchor + context)
+        val body = (from..to).joinToString("\n") { "%4d | %s".format(it + 1, it) }
+        return if (body.length > maxChars) body.take(maxChars) + "\n…" else body
+    }
+
 
     suspend fun delete(path: String): String = withContext(Dispatchers.IO) {
         val cleaned = sanitize(path)

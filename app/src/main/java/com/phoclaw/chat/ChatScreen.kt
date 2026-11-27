@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -29,6 +30,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -36,8 +38,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.phoclaw.chat.data.ChatMessage
+import com.phoclaw.chat.data.FileChange.Kind as FileChangeKind
 import com.phoclaw.chat.data.ModelProfile
 import com.phoclaw.chat.data.PendingAttachment
+import com.phoclaw.chat.ui.ChangesCard
 import com.phoclaw.chat.ui.MarkdownText
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.sample
@@ -57,6 +61,30 @@ fun ChatScreen(
     val snackbarHost = remember { SnackbarHostState() }
     var menuOpen by remember { mutableStateOf(false) }
     var profileSheetOpen by remember { mutableStateOf(false) }
+    /** 待确认撤销的消息下标。撤销会改动磁盘文件，和删除一样要问一次。 */
+    var pendingUndo by remember { mutableStateOf<Int?>(null) }
+
+    /*
+     * 导出对话。
+     *
+     * 用 CreateDocument 让用户自己挑位置，而不是直接写进工作区：
+     * 导出文件通常是要发出去的（丢进聊天软件、编辑器），放工作区里
+     * 反而会让 AI 下次 tree 的时候把这份导出也当成项目文件。
+     */
+    var exportText by remember { mutableStateOf("") }
+    var exportName by remember { mutableStateOf("phoclaw.md") }
+    val context = LocalContext.current
+    val exporter = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("text/markdown")
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        val ok = runCatching {
+            context.contentResolver.openOutputStream(uri)?.use {
+                it.write(exportText.toByteArray(Charsets.UTF_8))
+            } ?: error("无法打开目标文件")
+        }.isSuccess
+        vm.showBanner(if (ok) "已导出 ${exportName}" else "导出失败，换个位置再试")
+    }
 
     // 模型档案。切换档案 = 切换后端 + 模型 + 全部相关参数
     val profiles by vm.profiles.collectAsState()
@@ -196,6 +224,60 @@ fun ChatScreen(
         )
     }
 
+    // 撤销确认。
+    //
+    // 一定要问一次：撤销新建的文件意味着**删掉它**，而用户点「撤销」时想的是
+    // 「把代码改回去」，未必意识到那等于删除。列出会被动的文件比一句
+    // 「确认撤销」有用得多
+    pendingUndo?.let { index ->
+        val changes = state.messages.getOrNull(index)?.changes.orEmpty()
+        AlertDialog(
+            onDismissRequest = { pendingUndo = null },
+            icon = { Icon(Icons.Default.Undo, contentDescription = null) },
+            title = { Text("撤销这轮的改动？") },
+            text = {
+                Column {
+                    Text("以下文件会恢复成 AI 动手之前的样子：", fontSize = 13.sp)
+                    Spacer(Modifier.height(8.dp))
+                    changes.filter { it.canUndo }.take(8).forEach { c ->
+                        Text(
+                            text = when (c.kind) {
+                                FileChangeKind.CREATE -> "删除 ${c.path}"
+                                FileChangeKind.MODIFY -> "还原 ${c.path}"
+                                FileChangeKind.DELETE -> "恢复 ${c.path}"
+                            },
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    if (changes.count { it.canUndo } > 8) {
+                        Text(
+                            "…以及另外 ${changes.count { it.canUndo } - 8} 个文件",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        "撤销之后这一轮就没有记录了，无法再重做。",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    vm.undoChanges(index)
+                    pendingUndo = null
+                }) { Text("撤销") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingUndo = null }) { Text("取消") }
+            }
+        )
+    }
+
     // 模型切换弹层。放在 Scaffold 之前：ModalBottomSheet 自己是一个窗口，
     // 组合位置不影响它盖在谁上面
     if (profileSheetOpen) {
@@ -310,6 +392,25 @@ fun ChatScreen(
                                     onOpenSettings()
                                 }
                             )
+                            DropdownMenuItem(
+                                text = {
+                                    Column {
+                                        Text("导出对话")
+                                        Text(
+                                            "存成 Markdown，可分享到别处",
+                                            fontSize = 11.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                },
+                                enabled = state.messages.isNotEmpty() && !state.isStreaming,
+                                onClick = {
+                                    menuOpen = false
+                                    exportText = vm.exportMarkdown()
+                                    exportName = "${state.conversationTitle.ifBlank { "phoclaw" }}.md"
+                                    exporter.launch(exportName)
+                                }
+                            )
                         }
                     }
                 }
@@ -351,11 +452,18 @@ fun ChatScreen(
                     }
                     // 内部消息（工具结果回灌、附件内容注入）不渲染气泡，
                     // 但其挂载的工具日志要展示；思考过程同理 —— 有思考就要让人看见
-                    items(state.messages) { msg ->
-                        if (msg.isInternal && msg.toolLog.isEmpty() && msg.reasoning.isBlank()) {
-                            return@items
+                    itemsIndexed(state.messages) { index, msg ->
+                        if (msg.isInternal && msg.toolLog.isEmpty() &&
+                            msg.reasoning.isBlank() && msg.changes.isEmpty()
+                        ) {
+                            return@itemsIndexed
                         }
-                        MessageBubble(msg, attachmentFile = vm::attachmentFile)
+                        MessageBubble(
+                            msg = msg,
+                            attachmentFile = vm::attachmentFile,
+                            undoEnabled = !state.isStreaming,
+                            onUndo = { pendingUndo = index }
+                        )
                     }
 
                     /*
@@ -412,6 +520,9 @@ fun ChatScreen(
                 value = state.input,
                 isStreaming = state.isStreaming,
                 pending = state.pendingAttachments,
+                contextUsed = state.contextTokens,
+                contextBudget = activeProfile?.contextBudget ?: 32000,
+                onMeterClick = { vm.compressContextNow() },
                 onValueChange = vm::onInputChange,
                 onPickClick = {
                     attachmentPicker.launch(arrayOf(
@@ -690,7 +801,12 @@ private fun ReasoningBlock(text: String, streaming: Boolean) {
 }
 
 @Composable
-private fun MessageBubble(msg: UiMessage, attachmentFile: (String) -> File) {
+private fun MessageBubble(
+    msg: UiMessage,
+    attachmentFile: (String) -> File,
+    undoEnabled: Boolean = true,
+    onUndo: () -> Unit = {}
+) {
     val isUser = msg.role == "user"
     val isError = msg.isError
 
@@ -814,6 +930,17 @@ private fun MessageBubble(msg: UiMessage, attachmentFile: (String) -> File) {
                     }
                 }
             }
+        }
+
+        // 文件改动卡片。放在工具日志之后：先看「做了什么」，再看「改成了什么样」。
+        // 只有真的写了文件才有这张卡，纯查询类的一轮不会凭空多出一块
+        if (msg.changes.isNotEmpty()) {
+            Spacer(Modifier.height(6.dp))
+            ChangesCard(
+                changes = msg.changes,
+                undoEnabled = undoEnabled,
+                onUndo = onUndo
+            )
         }
     }
 }
@@ -946,11 +1073,116 @@ private fun PendingChip(item: PendingAttachment, onRemove: () -> Unit) {
     }
 }
 
+/**
+ * 上下文占用条。
+ *
+ * 常驻显示而不是藏进「更多」菜单，是因为它回答的是一个每轮都想知道的问题：
+ * 还能聊多久。颜色三档对应三种该做的事 —— 绿色照常聊，黄色该考虑收尾，
+ * 红色要么压缩要么开新会话。
+ *
+ * 点一下**不会**直接压缩：压缩要额外调一次模型（花钱、耗时），
+ * 误触的代价不该由用户承担。所以点开是一个小菜单，压缩是里面的一项。
+ */
+@Composable
+private fun ContextMeter(used: Int, budget: Int, onCompress: () -> Unit) {
+    if (budget <= 0) return
+    var menuOpen by remember { mutableStateOf(false) }
+    val ratio = (used.toFloat() / budget).coerceIn(0f, 1f)
+    val accent = when {
+        ratio >= 0.85f -> MaterialTheme.colorScheme.error
+        ratio >= 0.6f -> MaterialTheme.colorScheme.tertiary
+        else -> MaterialTheme.colorScheme.primary
+    }
+    val track = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)
+
+    Box {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .clickable { menuOpen = true }
+                .padding(horizontal = 14.dp, vertical = 5.dp)
+        ) {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "上下文 ${formatTokens(used)}",
+                    fontSize = 10.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    "${(ratio * 100).toInt()}% / ${formatTokens(budget)}",
+                    fontSize = 10.sp,
+                    color = if (used <= 0) MaterialTheme.colorScheme.onSurfaceVariant else accent
+                )
+            }
+            Spacer(Modifier.height(3.dp))
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(2.dp)
+                    .clip(CircleShape)
+                    .background(track)
+            ) {
+                if (used > 0) {
+                    Box(
+                        Modifier
+                            .fillMaxWidth(ratio.coerceAtLeast(0.02f))
+                            .fillMaxHeight()
+                            .background(accent)
+                    )
+                }
+            }
+        }
+
+        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+            DropdownMenuItem(
+                text = {
+                    Column {
+                        Text("压缩上下文", fontSize = 14.sp)
+                        Text(
+                            "把早期对话压成摘要，界面记录不受影响",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                },
+                onClick = {
+                    menuOpen = false
+                    onCompress()
+                }
+            )
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        "已用约 ${formatTokens(used)} / 预算 ${formatTokens(budget)} token",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                },
+                enabled = false,
+                onClick = {}
+            )
+        }
+    }
+}
+
+private fun formatTokens(tokens: Int): String = when {
+    tokens >= 1_000_000 -> "%.1fM".format(tokens / 1_000_000f)
+    tokens >= 1000 -> "%.1fk".format(tokens / 1000f)
+    else -> "$tokens"
+}
+
 @Composable
 private fun InputBar(
     value: String,
     isStreaming: Boolean,
     pending: List<PendingAttachment>,
+    contextUsed: Int,
+    contextBudget: Int,
+    onMeterClick: () -> Unit,
     onValueChange: (String) -> Unit,
     onPickClick: () -> Unit,
     onRemovePending: (String) -> Unit,
@@ -959,6 +1191,10 @@ private fun InputBar(
 ) {
     Surface(tonalElevation = 3.dp) {
         Column(modifier = Modifier.fillMaxWidth()) {
+            // 上下文占用条。常驻在输入区顶部而不是藏进菜单：
+            // 「还能聊多久」是个需要随时可见的信息，藏在两层菜单后面
+            // 等于让人在撞墙之后才知道该开新会话
+            ContextMeter(used = contextUsed, budget = contextBudget, onCompress = onMeterClick)
             // 待发送附件预览条：横向滚动，可逐个删除
             if (pending.isNotEmpty()) {
                 LazyRow(

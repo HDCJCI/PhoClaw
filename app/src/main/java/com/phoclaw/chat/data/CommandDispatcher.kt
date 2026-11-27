@@ -1,6 +1,7 @@
 package com.phoclaw.chat.data
 
 import com.phoclaw.chat.util.CommandParser
+import com.phoclaw.chat.util.TextPatch
 
 /**
  * 指令执行器：把一条解析好的指令真正落到工作区上。
@@ -24,6 +25,8 @@ import com.phoclaw.chat.util.CommandParser
  * @param shellSupported 设备本身支持不支持。鸿蒙上为 false，
  *   这时无论开关怎么设都直接拒绝，并说明是**设备**的问题
  * @param memory 长期记忆存储。与工作区**无关**：没授权工作区时记忆照样可用
+ * @param onChange 每完成一次文件写入就回调一条 [FileChange]。前台用它拼「本轮改了
+ *   哪些文件、能不能撤销」，后台任务传 null 即可 —— 无人值守场景没人点撤销按钮
  */
 class CommandDispatcher(
     private val workspace: WorkspaceRepository,
@@ -36,16 +39,20 @@ class CommandDispatcher(
     private val shellRunner: ShellRunner? = null,
     private val shellEnabled: Boolean = false,
     private val shellSupported: Boolean = true,
-    private val memory: MemoryStore? = null
+    private val memory: MemoryStore? = null,
+    private val onChange: ((FileChange) -> Unit)? = null
 ) {
 
     /** 真正执行单条指令，返回给模型看的文本结果。 */
     suspend fun dispatch(cmd: CommandParser.Command): String = when (cmd.action) {
         CommandParser.Command.Action.WRITE ->
-            workspace.writeText(cmd.path, cmd.content)
+            tracked(cmd.path) { workspace.writeText(cmd.path, cmd.content) }
+
+        CommandParser.Command.Action.EDIT ->
+            tracked(cmd.path) { edit(cmd.path, cmd.content) }
 
         CommandParser.Command.Action.APPEND ->
-            workspace.appendText(cmd.path, cmd.content)
+            tracked(cmd.path) { workspace.appendText(cmd.path, cmd.content) }
 
         CommandParser.Command.Action.READ ->
             "===== ${cmd.path} =====\n" + workspace.readText(cmd.path)
@@ -69,7 +76,7 @@ class CommandDispatcher(
 
         CommandParser.Command.Action.INFO -> workspace.info(cmd.path)
 
-        CommandParser.Command.Action.DELETE -> workspace.delete(cmd.path)
+        CommandParser.Command.Action.DELETE -> tracked(cmd.path) { workspace.delete(cmd.path) }
 
         CommandParser.Command.Action.MKDIR -> workspace.createDirectory(cmd.path)
 
@@ -96,6 +103,67 @@ class CommandDispatcher(
 
         // memory 指令：参数行是内容或子命令，正文可作为多行内容的备选来源
         CommandParser.Command.Action.MEMORY -> memory(cmd.path, cmd.content)
+    }
+
+    /**
+     * 精确替换。
+     *
+     * 正文的两段用 `--- 查找` / `--- 替换` 分隔。为什么不用两个参数写在参数行里：
+     * 参数行是单行的，而「查找」经常要带三五行的上下文才能唯一匹配。
+     *
+     * 解析交给 [TextPatch.parseBody]（宽容横线数量与写法，但两段必须都在），
+     * 这里只负责把「格式不对」翻译成模型能照着改的说明。
+     */
+    private suspend fun edit(path: String, content: String): String {
+        if (path.isBlank() || path == ".") {
+            return "请指定要修改的文件，格式：\n" +
+                    "```phoclaw:edit src/main.js\n--- 查找\n原内容\n--- 替换\n新内容\n```"
+        }
+        val parsed = TextPatch.parseBody(content)
+            ?: return "格式不对：正文需要两段，用 `--- 查找` 和 `--- 替换` 分隔。例如\n" +
+                    "```phoclaw:edit src/main.js\n--- 查找\nconsole.log(\"old\");\n--- 替换\nconsole.log(\"new\");\n```\n" +
+                    "要删掉某段代码，`--- 替换` 后面留空即可。"
+
+        return workspace.editText(path, parsed.first, parsed.second)
+    }
+
+    /**
+     * 包一层变更记录。
+     *
+     * 改动前后各读一次文件内容 —— 这是「撤销」唯一可靠的依据：
+     * 事后从磁盘读「当前内容」只能撤到最新状态，撤不回「这一轮开始之前」。
+     * 读失败（目录、超大文件、二进制）就把 [FileChange.truncated] 置 true，
+     * 界面上会老实说「没备份、不能撤销」，而不是给一个点了没反应的按钮。
+     */
+    private suspend fun tracked(path: String, action: suspend () -> String): String {
+        val existed = runCatching { workspace.exists(path) }.getOrDefault(false)
+        val before = if (existed) runCatching { workspace.readTextOrNull(path) }.getOrNull() else null
+
+        val result = action()
+
+        val stillExists = runCatching { workspace.exists(path) }.getOrDefault(false)
+        val after = if (stillExists) runCatching { workspace.readTextOrNull(path) }.getOrNull() else null
+
+        val kind = when {
+            !existed && stillExists -> FileChange.Kind.CREATE
+            existed && !stillExists -> FileChange.Kind.DELETE
+            else -> FileChange.Kind.MODIFY
+        }
+        val truncated = (existed && before == null) || (stillExists && after == null)
+
+        runCatching {
+            onChange?.invoke(
+                FileChange(
+                    path = path,
+                    kind = kind,
+                    before = before,
+                    after = after,
+                    truncated = truncated,
+                    at = System.currentTimeMillis()
+                )
+            )
+        }
+        return result
     }
 
     /**

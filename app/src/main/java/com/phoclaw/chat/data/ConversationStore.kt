@@ -56,7 +56,15 @@ data class StoredMessage(
      * 但**只用于显示**：转成 API 消息时这个字段会被丢掉，
      * 否则带 `reasoning_content` 的 assistant 消息会让部分后端直接 400。
      */
-    val reasoning: String = ""
+    val reasoning: String = "",
+    /**
+     * 这一轮里被改动的文件，用于展示 diff 与撤销。
+     *
+     * 挂在消息上而不是单独存一份，是因为「撤销」天然是按轮次的：
+     * 用户看到某条回复下面写着「改了 3 个文件」，想撤的就是这一批。
+     * 存成全局列表反而要额外维护「哪几条属于哪轮」的对应关系。
+     */
+    val changes: List<FileChange> = emptyList()
 )
 
 /**
@@ -202,6 +210,20 @@ class ConversationStore(context: Context) {
                         }
                     })
                 }
+                if (msg.changes.isNotEmpty()) {
+                    put("changes", JSONArray().apply {
+                        msg.changes.forEach { c ->
+                            put(JSONObject().apply {
+                                put("path", c.path)
+                                put("kind", c.kind.name)
+                                put("at", c.at)
+                                if (c.truncated) put("truncated", true)
+                                c.before?.let { put("before", it) }
+                                c.after?.let { put("after", it) }
+                            })
+                        }
+                    })
+                }
             })
         }
         return JSONObject().apply {
@@ -232,7 +254,8 @@ class ConversationStore(context: Context) {
                     else (0 until logArray.length()).map { logArray.optString(it) },
                     isInternal = obj.optBoolean("isInternal"),
                     attachments = parseAttachments(attArray),
-                    reasoning = obj.optString("reasoning")
+                    reasoning = obj.optString("reasoning"),
+                    changes = parseChanges(obj.optJSONArray("changes"))
                 )
             }
         }
@@ -276,8 +299,35 @@ class ConversationStore(context: Context) {
         }
     }
 
-    private fun ensureDir() {
-        if (!root.exists() && !root.mkdirs()) {
+    /**
+     * 解析变更记录。
+     *
+     * 与附件一样全程用 opt*：这段 JSON 是「附加信息」，任何一条解析不出来
+     * 都只该影响那一条的撤销能力，不该让整个会话读不开。
+     */
+    private fun parseChanges(array: JSONArray?): List<FileChange> {
+        if (array == null) return emptyList()
+        val types = FileChange.Kind.entries
+        return (0 until array.length()).mapNotNull { i ->
+            array.optJSONObject(i)?.let { obj ->
+                val path = obj.optString("path")
+                if (path.isBlank()) return@let null
+                val kindName = obj.optString("kind")
+                FileChange(
+                    path = path,
+                    kind = types.firstOrNull { it.name == kindName } ?: FileChange.Kind.MODIFY,
+                    // has() 判断而不是 optString：区分「字段不存在（null = 新建/删除）」
+                    // 与「字段是空字符串（改了但内容是空的）」
+                    before = if (obj.has("before")) obj.optString("before") else null,
+                    after = if (obj.has("after")) obj.optString("after") else null,
+                    truncated = obj.optBoolean("truncated"),
+                    at = obj.optLong("at")
+                )
+            }
+        }
+    }
+
+    private fun ensureDir() {        if (!root.exists() && !root.mkdirs()) {
             throw IOException("无法创建对话存储目录：${root.absolutePath}")
         }
     }

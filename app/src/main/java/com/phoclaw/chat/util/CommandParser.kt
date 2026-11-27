@@ -28,6 +28,19 @@ object CommandParser {
             WRITE, READ, LIST, DELETE, MKDIR, APPEND, COPY, MOVE, SEARCH, INFO, TREE,
 
             /**
+             * 精确替换文件里的一小段内容。
+             *
+             * 与 [WRITE] 的分工：[WRITE] 是「整份重写」，改一行也要把几百行吐一遍；
+             * 这个只发「原来的几行 + 新的几行」。手机上改代码，99% 的编辑都是
+             * 改几行，把全量重写当默认手段等于每改一个字烧掉整个文件。
+             *
+             * 硬约束：查找内容必须在文件里**唯一**。见
+             * `WorkspaceRepository.editText` 里的说明 —— 匹配到多处宁可报错，
+             * 也不能「改成功了但改错了地方」。
+             */
+            EDIT,
+
+            /**
              * 联网搜索。
              *
              * 与 [SEARCH] 是两回事：[SEARCH] 搜的是工作区里的文件内容，

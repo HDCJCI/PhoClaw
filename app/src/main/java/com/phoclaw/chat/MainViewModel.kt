@@ -21,6 +21,7 @@ import com.phoclaw.chat.data.ConversationMeta
 import com.phoclaw.chat.data.ConversationStore
 import com.phoclaw.chat.data.CredentialStore
 import com.phoclaw.chat.data.DeviceEnv
+import com.phoclaw.chat.data.FileChange
 import com.phoclaw.chat.data.LlmClient
 import com.phoclaw.chat.data.MemoryStore
 import com.phoclaw.chat.data.ModelProfile
@@ -73,7 +74,15 @@ data class UiMessage(
      * 而且**绝不能**回传给 API —— 多数后端收到带 `reasoning_content` 的
      * assistant 消息会直接 400。
      */
-    val reasoning: String = ""
+    val reasoning: String = "",
+    /**
+     * 这一轮里 AI 改过的文件。
+     *
+     * 与 [toolLog] 并列而不是合并进去：日志是「它做了什么」的文字流，
+     * 这里是可结构化展示（红绿 diff）与可撤销的数据。混在一起的话，
+     * 想给某个文件加个「撤销」按钮就得回头去解析字符串。
+     */
+    val changes: List<FileChange> = emptyList()
 ) {
     /**
      * 是否有任何可渲染内容。
@@ -176,8 +185,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             shellRunner = shellRunner,
             shellEnabled = credentials.shellEnabled,
             shellSupported = DeviceEnv.shellAvailable,
-            memory = memoryStore
+            memory = memoryStore,
+            onChange = { turnChanges += it }
         )
+
+    /**
+     * 本轮已发生的文件变更。
+     *
+     * 在 [runTurn] 开始时清空、结束时整体挂到助手气泡上 —— 按「轮」而不是
+     * 按「条指令」聚合，是因为用户看到的是「这条回复改了哪些东西」，
+     * 他点撤销也是冲着这条回复去的。
+     */
+    private val turnChanges = mutableListOf<FileChange>()
 
     private val _state = MutableStateFlow(ChatUiState())
     val state: StateFlow<ChatUiState> = _state.asStateFlow()
@@ -474,6 +493,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun clearBanner() = _state.update { it.copy(banner = null) }
 
+    /** 给界面一个一次性的提示（走同一条 Snackbar 通道）。 */
+    fun showBanner(message: String) = _state.update { it.copy(banner = message) }
+
     fun stopStreaming() {
         streamJob?.cancel()
         streamJob = null
@@ -530,6 +552,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     summarizedCount = stored.summarizedCount
                 )
             }
+            refreshContextUsage()
         }
     }
 
@@ -565,6 +588,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     contextTokens = 0
                 )
             }
+            // 打开旧会话时也要算一次：否则进度条停在 0，用户会以为上下文是空的，
+            // 一提问才发现已经快满了
+            refreshContextUsage()
         }
     }
 
@@ -770,6 +796,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * 跑一轮对话：流式接收 → 解析指令 → 执行 → 把结果回灌给模型，最多迭代 [MAX_ROUNDS] 次。
      */
     private suspend fun runTurn() {
+        turnChanges.clear()
         try {
             // 附件准备必须在循环外做且只做一次：
             // 图片 Base64 跨 8 轮复用，文本内容作为常驻消息注入
@@ -799,8 +826,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
                 if (parsed.commands.isEmpty()) return finishStreaming()
 
+                // 每轮的工具调用是独立的：清掉上一轮残留，只记录这一轮改的东西。
+                // 否则第二个助手气泡会重复显示第一个气泡里已经列为「已修改」的文件
+                turnChanges.clear()
                 val logs = executeCommands(parsed.commands)
                 attachToolLog(assistantIndex, logs)
+                attachChanges(assistantIndex)
 
                 // 把执行结果回灌，让模型继续下一步
                 _state.update {
@@ -1409,6 +1440,79 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * 把本轮累积的文件变更挂到助手气泡上。
+     *
+     * 同一个文件在一轮里被改两次时保留两条记录 —— 撤销要靠它们逐条倒推，
+     * 合并成一条就只能撤到「第一次改之前」或者「最后一次改之后」，都不对。
+     */
+    private fun attachChanges(index: Int) {
+        if (index < 0 || turnChanges.isEmpty()) return
+        val snapshot = turnChanges.toList()
+        _state.update { s ->
+            s.copy(messages = s.messages.toMutableList().also {
+                if (index <= it.lastIndex) it[index] = it[index].copy(changes = snapshot)
+            })
+        }
+    }
+
+    /**
+     * 撤销某条回复造成的文件改动。
+     *
+     * 倒序执行：同一个文件在一轮里被改了三次，只有从后往前回放才能
+     * 逐步退回最初的状态。正序的话第二次「恢复」会把第三次的结果又覆盖回去。
+     *
+     * 撤销**不走** [CommandDispatcher]，因此不会弹确认框 —— 这是用户自己
+     * 主动点的按钮，不是模型发起的操作。但也正因如此，界面那边要有一次确认。
+     */
+    fun undoChanges(messageIndex: Int) {
+        val msg = _state.value.messages.getOrNull(messageIndex) ?: return
+        if (msg.changes.isEmpty()) return
+        if (_state.value.isStreaming) {
+            _state.update { it.copy(banner = "正在生成，稍后再撤销") }
+            return
+        }
+
+        viewModelScope.launch {
+            val undoable = msg.changes.filter { it.canUndo }
+            if (undoable.isEmpty()) {
+                _state.update { it.copy(banner = "这些改动没有备份（文件过大），无法撤销") }
+                return@launch
+            }
+
+            val failures = mutableListOf<String>()
+            undoable.asReversed().forEach { change ->
+                runCatching {
+                    when (change.kind) {
+                        FileChange.Kind.CREATE -> workspace.delete(change.path)
+                        FileChange.Kind.MODIFY -> workspace.overwrite(change.path, change.before.orEmpty())
+                        FileChange.Kind.DELETE -> workspace.overwrite(change.path, change.after.orEmpty())
+                    }
+                }.onFailure { e -> failures += "${change.path}：${e.message}" }
+            }
+
+            // 撤完就把记录清掉：留着的话按钮还在，再点一次会对着已经变过的
+            // 文件重放一遍，把用户手动改的东西也冲掉
+            _state.update { s ->
+                if (messageIndex > s.messages.lastIndex) s
+                else s.copy(messages = s.messages.toMutableList().also {
+                    it[messageIndex] = it[messageIndex].copy(changes = emptyList())
+                })
+            }
+
+            val ok = undoable.size - failures.size
+            val message = buildString {
+                append("已撤销 $ok 个文件的改动")
+                if (failures.isNotEmpty()) {
+                    append("，${failures.size} 个失败：")
+                    append(failures.joinToString("；"))
+                }
+            }
+            _state.update { it.copy(banner = message) }
+            persistCurrentConversation(immediate = true)
+        }
+    }
+
     private fun finishStreaming() {
         // 所有结束路径（正常、出错、用户停止）都要清掉流式标记，
         // 否则那一条气泡会一直以纯文本形式显示，不会渲染 Markdown
@@ -1417,6 +1521,21 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         streamJob = null
         // 一轮结束是天然的落盘时机：此时消息完整，不会存下半截回复
         persistCurrentConversation(immediate = true)
+        refreshContextUsage()
+    }
+
+    /**
+     * 刷新「当前上下文占用」。
+     *
+     * 之前这个数字只在压缩流程里更新 —— 关掉自动压缩的用户永远看到 0，
+     * 进度条也就永远是空的。每轮结束算一次，成本是一次字符串遍历，
+     * 比起让用户对着一个不动的数字猜还有多少余量，这点开销值得。
+     */
+    private fun refreshContextUsage() {
+        runCatching {
+            val used = TokenEstimator.estimate(buildApiMessages())
+            _state.update { it.copy(contextTokens = used) }
+        }
     }
 
     // ---------------------------------------------------------------- 技能
@@ -1627,6 +1746,85 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---------------------------------------------------------------- 类型转换
 
+    /**
+     * 把当前会话导出成 Markdown。
+     *
+     * 只导出**界面上看得见的东西**：内部回灌消息（工具结果、附件正文）不写 ——
+     * 那些是给模型看的中间产物，几十 KB 的附件原文掺进去，导出的文件就没法读了。
+     * 工具日志保留，但收在 `<details>` 里：想追查时能展开，默认不干扰阅读。
+     */
+    fun exportMarkdown(): String {
+        val s = _state.value
+        val title = s.conversationTitle.ifBlank { "PhoClaw 对话" }
+        val stamp = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.getDefault())
+            .format(java.util.Date())
+
+        return buildString {
+            appendLine("# $title")
+            appendLine()
+            appendLine("> 导出自 PhoClaw · $stamp")
+            if (s.workspaceReady) appendLine("> 工作区：${s.workspaceName ?: "未命名"}")
+            appendLine()
+            appendLine("---")
+            appendLine()
+
+            s.messages.forEach { msg ->
+                if (msg.isInternal) return@forEach
+                if (!msg.isRenderable) return@forEach
+
+                when (msg.role) {
+                    ChatMessage.ROLE_USER -> appendLine("## 我")
+                    ChatMessage.ROLE_ASSISTANT -> appendLine("## PhoClaw")
+                    else -> appendLine("## ${msg.role}")
+                }
+                appendLine()
+
+                if (msg.attachments.isNotEmpty()) {
+                    msg.attachments.forEach { a ->
+                        appendLine("_[${if (a.isImage) "图片" else "文件"}] ${a.displayName}_")
+                    }
+                    appendLine()
+                }
+
+                if (msg.reasoning.isNotBlank()) {
+                    appendLine("<details><summary>思考过程</summary>")
+                    appendLine()
+                    appendLine(msg.reasoning)
+                    appendLine()
+                    appendLine("</details>")
+                    appendLine()
+                }
+
+                if (msg.text.isNotBlank()) {
+                    appendLine(msg.text)
+                    appendLine()
+                }
+
+                if (msg.changes.isNotEmpty()) {
+                    appendLine("**改动文件**")
+                    appendLine()
+                    msg.changes.forEach { c ->
+                        val stats = c.stats
+                        val delta = if (stats == null) "" else " (+${stats.added} −${stats.removed})"
+                        appendLine("- `${c.symbol}` `${c.path}`$delta")
+                    }
+                    appendLine()
+                }
+
+                if (msg.toolLog.isNotEmpty()) {
+                    appendLine("<details><summary>工作区操作（${msg.toolLog.size} 条）</summary>")
+                    appendLine()
+                    appendLine("```")
+                    msg.toolLog.forEach { appendLine(it) }
+                    appendLine("```")
+                    appendLine()
+                    appendLine("</details>")
+                    appendLine()
+                }
+            }
+        }.trim() + "\n"
+    }
+
     private fun UiMessage.toStoredMessage() = StoredMessage(
         role = role,
         text = text,
@@ -1634,7 +1832,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         toolLog = toolLog,
         isInternal = isInternal,
         attachments = attachments,
-        reasoning = reasoning
+        reasoning = reasoning,
+        changes = changes
     )
 
     private fun StoredMessage.toUiMessage() = UiMessage(
@@ -1645,7 +1844,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         isInternal = isInternal,
         isStreaming = false,
         attachments = attachments,
-        reasoning = reasoning
+        reasoning = reasoning,
+        changes = changes
     )
 
     private fun newId(): String = UUID.randomUUID().toString().replace("-", "").take(16)

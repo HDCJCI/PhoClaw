@@ -5,6 +5,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -44,6 +45,7 @@ import androidx.compose.ui.unit.sp
 import com.phoclaw.chat.util.MarkdownParser
 import com.phoclaw.chat.util.MarkdownParser.Block
 import com.phoclaw.chat.util.MarkdownParser.Span
+import com.phoclaw.chat.util.SyntaxHighlighter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -166,14 +168,11 @@ private fun BlockView(
                         )
                         Spacer(Modifier.height(4.dp))
                     }
-                    Text(
-                        text = block.code,
-                        fontFamily = FontFamily.Monospace,
+                    HighlightedCode(
+                        code = block.code,
+                        language = block.language,
                         fontSize = fontSize * 0.85f,
-                        lineHeight = fontSize * 1.25f,
-                        modifier = Modifier
-                            .horizontalScroll(rememberScrollState())
-                            .fillMaxWidth()
+                        lineHeight = fontSize * 1.25f
                     )
                 }
             }
@@ -269,6 +268,66 @@ private fun BlockView(
  *
  * 勾选态用主题色填充方块 + 白色对勾；未勾选用描边空心方块。
  */
+/**
+ * 带语法着色的代码块。
+ *
+ * 着色结果按（code, language, 明暗）缓存 —— 流式期间同一段代码块每 90ms
+ * 重算一次，中等的代码块（200 行）单次扫描不到 1ms，不缓存也可以，
+ * 但用户往上翻历史时几十个代码块同时重组就没必要重复算了。
+ *
+ * 横向滚动仍然保留：着色只改颜色，不改换行策略。长行照旧可以拖着看，
+ * 这是聊天里读代码最实际的需要 —— 自动折行会把缩进搞乱。
+ */
+@Composable
+private fun HighlightedCode(
+    code: String,
+    language: String,
+    fontSize: androidx.compose.ui.unit.TextUnit,
+    lineHeight: androidx.compose.ui.unit.TextUnit
+) {
+    val dark = isSystemInDarkTheme()
+    val annotated = remember(code, language, dark) {
+        buildAnnotatedString {
+            SyntaxHighlighter.highlight(code, language).forEach { segment ->
+                val color = codeColor(segment.kind, dark)
+                if (color == null) append(segment.text)
+                else withStyle(SpanStyle(color = color)) { append(segment.text) }
+            }
+        }
+    }
+    Text(
+        text = annotated,
+        fontFamily = FontFamily.Monospace,
+        fontSize = fontSize,
+        lineHeight = lineHeight,
+        modifier = Modifier
+            .horizontalScroll(rememberScrollState())
+            .fillMaxWidth()
+    )
+}
+
+/**
+ * 代码着色配色。
+ *
+ * 亮暗两套是分别调的，不是把同一组颜色改透明度 —— 深色下高饱和的紫色放到
+ * 白底上会刺眼到看不清，而浅色里那种沉稳的深紫放到黑底上又几乎看不见。
+ */
+private fun codeColor(kind: SyntaxHighlighter.Kind, dark: Boolean): Color? = when (kind) {
+    SyntaxHighlighter.Kind.PLAIN -> null
+    SyntaxHighlighter.Kind.KEYWORD ->
+        if (dark) Color(0xFFC792EA) else Color(0xFF7C3AED)
+    SyntaxHighlighter.Kind.STRING ->
+        if (dark) Color(0xFFA5D6A7) else Color(0xFF047857)
+    SyntaxHighlighter.Kind.COMMENT ->
+        if (dark) Color(0xFF7F8B99) else Color(0xFF6B7280)
+    SyntaxHighlighter.Kind.NUMBER ->
+        if (dark) Color(0xFFF0A868) else Color(0xFFB45309)
+    SyntaxHighlighter.Kind.TYPE ->
+        if (dark) Color(0xFF8AB4F8) else Color(0xFF1D4ED8)
+    SyntaxHighlighter.Kind.META ->
+        if (dark) Color(0xFFE8C07D) else Color(0xFFA16207)
+}
+
 @Composable
 private fun TaskCheckbox(checked: Boolean, modifier: Modifier = Modifier) {
     val accent = MaterialTheme.colorScheme.primary
